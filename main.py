@@ -5,7 +5,7 @@ import logging
 import pkg_resources
 try:
     ver = pkg_resources.get_distribution("youtube-transcript-api").version
-    print(f"✅ VERSIÓN INSTALADA: {ver}")
+    print(f"✅ VERSsIÓN INSTALADA: {ver}")
 except:
     print("⚠️ NO SE PUDO VERIFICAR VERSIÓN")
 
