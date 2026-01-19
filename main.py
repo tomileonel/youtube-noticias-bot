@@ -3,7 +3,7 @@ import sys
 import re
 import logging
 import glob
-import yt_dlp  # LIBRERÍA NUEVA
+import yt_dlp
 from googleapiclient.discovery import build
 import google.generativeai as genai
 from sqlalchemy import create_engine, Column, String, Text, DateTime
@@ -21,7 +21,7 @@ if cookies_env:
         f.write(cookies_env)
     print("✅ Cookies cargadas desde el Secreto.")
 else:
-    print("⚠️ ADVERTENCIA: No hay cookies. Es probable que falle con videos sensibles.")
+    print("⚠️ ADVERTENCIA: No hay cookies. Fallará con videos sensibles.")
 
 # --- 2. BASE DE DATOS ---
 db_string = os.getenv('DATABASE_URL')
@@ -60,24 +60,25 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- 4. FUNCIÓN MAESTRA CON YT-DLP ---
+# --- 4. FUNCIÓN MAESTRA CON YT-DLP (CORREGIDA) ---
 def get_transcript_ytdlp(video_id):
     print(f"DEBUG: Intentando descargar subtítulos para {video_id} con yt-dlp...")
     url = f"https://www.youtube.com/watch?v={video_id}"
     
-    # Configuración para descargar SOLO texto (sin video)
     ydl_opts = {
-        'skip_download': True,      # No bajar video
-        'writesubtitles': True,     # Bajar subs manuales
-        'writeautomaticsub': True,  # Bajar subs auto
-        'subtitleslangs': ['es', 'es-419', 'en'], # Idiomas
-        'outtmpl': f'/tmp/{video_id}', # Guardar en carpeta temporal
+        'skip_download': True,
+        'writesubtitles': True,
+        'writeautomaticsub': True,
+        'subtitleslangs': ['es', 'es-419', 'en'],
+        'outtmpl': f'/tmp/{video_id}',
         'quiet': True,
-        # Simulamos ser Android para evitar bloqueos
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+        'ignoreerrors': True, # Para que no explote si falla uno
+        # CAMBIO CLAVE: Quitamos 'extractor_args' (Android)
+        # AGREGAMOS: User Agent para parecer un navegador de verdad en PC
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
 
-    # Si tenemos cookies, se las pasamos
+    # Pasamos las cookies explícitamente
     if os.path.exists(COOKIES_FILE):
         ydl_opts['cookiefile'] = COOKIES_FILE
 
@@ -85,34 +86,35 @@ def get_transcript_ytdlp(video_id):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         
-        # Buscar el archivo generado (puede ser .vtt o .srv3)
+        # Buscar el archivo generado
         files = glob.glob(f"/tmp/{video_id}*")
-        if not files:
-            print("❌ ERROR: yt-dlp terminó pero no generó archivo de subtítulos.")
+        
+        # Filtrar solo archivos de texto (evitar basura si bajó algo más)
+        valid_files = [f for f in files if f.endswith('.vtt') or f.endswith('.srv3') or f.endswith('.ttml')]
+        
+        if not valid_files:
+            print(f"❌ ERROR: No se generaron subtítulos para {video_id}.")
             return None
             
-        filename = files[0] # Agarramos el primero que haya
-        print(f"DEBUG: Archivo descargado: {filename}")
+        filename = valid_files[0]
+        print(f"DEBUG: Procesando archivo: {filename}")
         
-        # Leemos y limpiamos el archivo (quitamos tiempos y basura)
         clean_text = []
         with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
             for line in lines:
-                # Filtrar líneas de tiempo, cabeceras y vacías
                 line = line.strip()
                 if not line: continue
                 if '-->' in line: continue
                 if line.startswith('WEBVTT') or line.startswith('Kind:') or line.startswith('Language:'): continue
                 if line.isdigit(): continue
                 
-                # Quitar etiquetas raras <c> y duplicados
                 line = re.sub(r'<[^>]+>', '', line)
                 if clean_text and clean_text[-1] == line:
                     continue
                 clean_text.append(line)
         
-        # Borramos el archivo temporal
+        # Limpieza de archivos temporales
         for f in files:
             if os.path.exists(f): os.remove(f)
         
@@ -123,6 +125,9 @@ def get_transcript_ytdlp(video_id):
         return None
 
 def generate_news(text, title):
+    if len(text) < 50: # Si el texto es muy corto, algo salió mal
+        return None
+        
     model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
     Eres periodista. Crea noticia HTML para WordPress sobre: '{title}'.
@@ -154,11 +159,10 @@ def main():
 
             print(f"[NUEVO] Procesando: {vtitle_clean}")
             
-            # USAMOS LA NUEVA FUNCIÓN
             text = get_transcript_ytdlp(vid)
             
             if not text:
-                print(" -- Saltando (Imposible obtener texto)")
+                print(" -- Saltando (Bloqueado o sin texto)")
                 continue
 
             html = generate_news(text, vtitle_clean)
@@ -171,7 +175,6 @@ def main():
     except Exception as e:
         print(f"Error General: {e}")
     finally:
-        # Borrar cookies al cerrar
         if os.path.exists(COOKIES_FILE):
             os.remove(COOKIES_FILE)
         session.close()
