@@ -13,19 +13,6 @@ from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 
-# --- CONFIGURACIÓN DE COOKIES ---
-COOKIES_FILE = "cookies.txt"
-cookies_env = os.getenv('YOUTUBE_COOKIES')
-
-print("--- DIAGNÓSTICO DE COOKIES ---")
-if cookies_env:
-    print(f"✅ Secreto YOUTUBE_COOKIES encontrado (Longitud: {len(cookies_env)} caracteres)")
-    with open(COOKIES_FILE, "w") as f:
-        f.write(cookies_env)
-else:
-    print("⚠️ NO se encontró YOUTUBE_COOKIES. El bot intentará entrar sin pase (posible bloqueo).")
-print("------------------------------")
-
 # --- BD ---
 db_string = os.getenv('DATABASE_URL')
 if db_string and db_string.startswith("postgres://"):
@@ -63,59 +50,74 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- SOLUCIÓN IA CON DISFRAZ DE IPHONE ---
+# --- SOLUCIÓN CON INVIDIOUS (ESPEJOS DE YOUTUBE) ---
 def transcribir_con_ia(video_id):
-    print(f"DEBUG: 🤖 La IA va a escuchar el video {video_id}...")
+    print(f"DEBUG: 🤖 Intentando descargar audio de {video_id}...")
     
     output_filename = f"audio_{video_id}"
-    url = f"https://www.youtube.com/watch?v={video_id}"
+    final_audio = f"{output_filename}.mp3"
     
-    # CONFIGURACIÓN CLAVE: DISFRAZ DE IPHONE
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_filename,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '128',
-        }],
-        'quiet': True,
-        'no_warnings': True,
-        # TRUCO: Usar cliente 'ios' (iPhone) para evitar el bloqueo "Sign in"
-        'extractor_args': {'youtube': {'player_client': ['ios']}},
-    }
+    # Lista de instancias de Invidious que suelen funcionar (sin bloqueos)
+    # Estas URLs actúan como un proxy transparente
+    invidious_instances = [
+        f"https://inv.tux.pizza/watch?v={video_id}",
+        f"https://invidious.jing.rocks/watch?v={video_id}",
+        f"https://vid.uff.ink/watch?v={video_id}",
+        f"https://yt.artemislena.eu/watch?v={video_id}",
+        f"https://invidious.projectsegfau.lt/watch?v={video_id}"
+    ]
     
-    if os.path.exists(COOKIES_FILE):
-        ydl_opts['cookiefile'] = COOKIES_FILE
+    # Opción de respaldo: URL original
+    urls_to_try = invidious_instances + [f"https://www.youtube.com/watch?v={video_id}"]
+
+    for url in urls_to_try:
+        print(f"   Trying URL: {url} ...")
+        
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output_filename,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '128',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            # Forzamos IPV4 y eliminamos clientes complejos
+            'force_ipv4': True,
+            'geo_bypass': True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            
+            if os.path.exists(final_audio):
+                print("   ✅ Descarga exitosa.")
+                break # Salimos del bucle si funcionó
+        except Exception as e:
+            print(f"   ❌ Falló esta instancia, probando siguiente...")
+            continue
+
+    if not os.path.exists(final_audio):
+        print("❌ ERROR FINAL: Ninguna instancia pudo descargar el audio.")
+        return None
 
     try:
-        # Pausa para no parecer robot ansioso
-        time.sleep(random.uniform(3, 7))
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            
-        final_audio = f"{output_filename}.mp3"
-        
-        if not os.path.exists(final_audio):
-            return None
-
         # Transcribir usando Whisper
         print("DEBUG: 🎧 Procesando audio con Whisper...")
         model = whisper.load_model("tiny") 
         result = model.transcribe(final_audio)
         texto_generado = result["text"]
         
-        # Limpiar archivo de audio
-        if os.path.exists(final_audio):
-            os.remove(final_audio)
-            
+        # Limpiar
+        os.remove(final_audio)
         return texto_generado
 
     except Exception as e:
-        print(f"❌ Error descarga/IA: {e}")
-        if os.path.exists(f"{output_filename}.mp3"):
-            os.remove(f"{output_filename}.mp3")
+        print(f"❌ Error IA: {e}")
+        if os.path.exists(final_audio):
+            os.remove(final_audio)
         return None
 
 def generate_news(text, title):
@@ -154,7 +156,7 @@ def main():
             text = transcribir_con_ia(vid)
             
             if not text:
-                print(" -- Saltando (Bloqueo persistente)")
+                print(" -- Saltando (Error de descarga)")
                 continue
 
             html = generate_news(text, vtitle_clean)
@@ -167,8 +169,6 @@ def main():
     except Exception as e:
         print(f"Error General: {e}")
     finally:
-        if os.path.exists(COOKIES_FILE):
-            os.remove(COOKIES_FILE)
         session.close()
 
 if __name__ == "__main__":
