@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Instalar requisitos
-        run: pip install -r requirements.txt
+        run: pip install --force-reinstall -v "youtube-transcript-api>=0.6.1" -r requirements.txt
       - name: Correr Bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
