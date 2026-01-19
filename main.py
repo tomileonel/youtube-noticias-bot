@@ -7,22 +7,25 @@ import google.generativeai as genai
 from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
+from youtube_transcript_api import YouTubeTranscriptApi
 from datetime import datetime
 
+# ================== LOGGING ==================
 logging.basicConfig(level=logging.INFO)
 
 # ================== BD ==================
-db_string = os.getenv('DATABASE_URL')
-if db_string and db_string.startswith("postgres://"):
-    db_string = db_string.replace("postgres://", "postgresql://", 1)
+db_string = os.getenv("DATABASE_URL")
 if not db_string:
     raise RuntimeError("DATABASE_URL no definido")
+
+if db_string.startswith("postgres://"):
+    db_string = db_string.replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(db_string)
 Base = declarative_base()
 
 class VideoNoticia(Base):
-    __tablename__ = 'noticias_youtube'
+    __tablename__ = "noticias_youtube"
     id = Column(String, primary_key=True)
     titulo = Column(String)
     contenido_noticia = Column(Text)
@@ -34,17 +37,17 @@ Session = sessionmaker(bind=engine)
 
 # ================== APIs ==================
 youtube = build(
-    'youtube',
-    'v3',
-    developerKey=os.getenv('YOUTUBE_API_KEY')
+    "youtube",
+    "v3",
+    developerKey=os.getenv("YOUTUBE_API_KEY")
 )
 
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ================== HELPERS ==================
 def limpiar_titulo(texto):
-    texto = re.sub(r'[^\w\s\u00C0-\u00FF.,!¡?¿\-:;"\']', '', texto)
-    return re.sub(r'\s+', ' ', texto).strip()
+    texto = re.sub(r"[^\w\s\u00C0-\u00FF.,!¡?¿\-:;\"']", "", texto)
+    return re.sub(r"\s+", " ", texto).strip()
 
 def get_latest_videos(channel_id, max_results=5):
     req = youtube.search().list(
@@ -55,8 +58,18 @@ def get_latest_videos(channel_id, max_results=5):
         type="video"
     )
     res = req.execute()
-    return [{'id': i['id']['videoId'], 'title': i['snippet']['title']}
-            for i in res.get('items', [])]
+    return [
+        {"id": i["id"]["videoId"], "title": i["snippet"]["title"]}
+        for i in res.get("items", [])
+    ]
+
+# ================== SUBTÍTULOS ==================
+def intentar_subtitulos(video_id):
+    try:
+        t = YouTubeTranscriptApi.get_transcript(video_id, languages=["es"])
+        return " ".join(x["text"] for x in t)
+    except Exception:
+        return None
 
 # ================== AUDIO ==================
 def descargar_audio(video_id):
@@ -65,8 +78,12 @@ def descargar_audio(video_id):
 
     cmd = [
         "yt-dlp",
-        "-x",
+        "-f", "bestaudio",
+        "--extract-audio",
         "--audio-format", "mp3",
+        "--extractor-args", "youtube:player_client=android",
+        "--force-ipv4",
+        "--no-playlist",
         "-o", output,
         url
     ]
@@ -78,8 +95,15 @@ def descargar_audio(video_id):
         logging.error(f"yt-dlp error {video_id}: {e}")
         return None
 
-# ================== TRANSCRIPCION ==================
+# ================== TRANSCRIPCIÓN ==================
 def transcribir(video_id):
+    # 1️⃣ Subtítulos oficiales
+    texto = intentar_subtitulos(video_id)
+    if texto and len(texto) > 100:
+        logging.info("✔ Usando subtítulos oficiales")
+        return texto
+
+    # 2️⃣ Whisper
     audio = descargar_audio(video_id)
     if not audio:
         return None
@@ -97,15 +121,17 @@ def transcribir(video_id):
 
 # ================== IA NOTICIA ==================
 def generate_news(text, title):
-    if not text or len(text) < 100:
+    if not text or len(text) < 200:
         return None
 
     model = genai.GenerativeModel("gemini-1.5-flash")
 
     prompt = f"""
 Eres periodista profesional.
-Escribe una noticia HTML para WordPress basada en el video titulado:
-"{title}"
+Redacta una noticia en HTML para WordPress basada en el siguiente video:
+
+TÍTULO:
+{title}
 
 TRANSCRIPCIÓN:
 {text[:25000]}
@@ -114,25 +140,30 @@ REGLAS:
 - HTML limpio (<h2>, <p>, <ul>)
 - Más de 300 palabras
 - Español neutro
+- Estilo informativo
 - Sin emojis
 """
 
-    return model.generate_content(prompt).text
+    try:
+        return model.generate_content(prompt).text
+    except Exception as e:
+        logging.error(f"Gemini error: {e}")
+        return None
 
 # ================== MAIN ==================
 def main():
-    cid = os.getenv('CHANNEL_ID')
-    if not cid:
+    channel_id = os.getenv("CHANNEL_ID")
+    if not channel_id:
         raise RuntimeError("CHANNEL_ID no definido")
 
     session = Session()
+    videos = get_latest_videos(channel_id)
 
-    videos = get_latest_videos(cid)
-    logging.info(f"Videos analizados: {len(videos)}")
+    logging.info(f"Analizando {len(videos)} videos")
 
     for v in videos:
-        vid = v['id']
-        title = limpiar_titulo(v['title'])
+        vid = v["id"]
+        title = limpiar_titulo(v["title"])
 
         if session.query(VideoNoticia).filter_by(id=vid).first():
             logging.info(f"YA EXISTE: {title}")
@@ -140,12 +171,12 @@ def main():
 
         logging.info(f"PROCESANDO: {title}")
 
-        text = transcribir(vid)
-        if not text:
+        texto = transcribir(vid)
+        if not texto:
             logging.warning("Transcripción fallida")
             continue
 
-        html = generate_news(text, title)
+        html = generate_news(texto, title)
         if not html:
             logging.warning("Generación IA fallida")
             continue
@@ -159,7 +190,7 @@ def main():
 
         session.add(post)
         session.commit()
-        logging.info("GUARDADO EN BD")
+        logging.info("✔ GUARDADO EN BD")
 
     session.close()
 
