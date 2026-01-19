@@ -11,7 +11,10 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from datetime import datetime
 
 # ================== LOGGING ==================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # ================== BD ==================
 db_string = os.getenv("DATABASE_URL")
@@ -71,18 +74,15 @@ def intentar_subtitulos(video_id):
     except Exception:
         return None
 
-# ================== AUDIO ==================
+# ================== AUDIO (LOCAL) ==================
 def descargar_audio(video_id):
     url = f"https://www.youtube.com/watch?v={video_id}"
     output = f"audio_{video_id}.mp3"
 
     cmd = [
         "yt-dlp",
-        "-f", "bestaudio",
-        "--extract-audio",
+        "-x",
         "--audio-format", "mp3",
-        "--extractor-args", "youtube:player_client=android",
-        "--force-ipv4",
         "--no-playlist",
         "-o", output,
         url
@@ -97,19 +97,19 @@ def descargar_audio(video_id):
 
 # ================== TRANSCRIPCIÓN ==================
 def transcribir(video_id):
-    # 1️⃣ Subtítulos oficiales
+    # 1️⃣ Subtítulos oficiales (rápido y gratis)
     texto = intentar_subtitulos(video_id)
     if texto and len(texto) > 100:
         logging.info("✔ Usando subtítulos oficiales")
         return texto
 
-    # 2️⃣ Whisper
+    # 2️⃣ Whisper local
     audio = descargar_audio(video_id)
     if not audio:
         return None
 
     try:
-        model = whisper.load_model("tiny")
+        model = whisper.load_model("small")  # mejor calidad local
         result = model.transcribe(audio, language="es")
         return result["text"]
     except Exception as e:
@@ -128,7 +128,7 @@ def generate_news(text, title):
 
     prompt = f"""
 Eres periodista profesional.
-Redacta una noticia en HTML para WordPress basada en el siguiente video:
+Redacta una noticia en HTML para WordPress basada en el siguiente video.
 
 TÍTULO:
 {title}
