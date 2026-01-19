@@ -46,53 +46,44 @@ def get_latest_videos(channel_id):
         return []
 
 def get_transcript_ytdlp(video_id):
-    """
-    Usa yt-dlp para descargar subtítulos (auto o manuales)
-    y limpiar el formato VTT para dejar solo texto.
-    """
     print(f"DEBUG: Intentando descarga con yt-dlp para {video_id}...")
     url = f"https://www.youtube.com/watch?v={video_id}"
     
-    # Configuración para descargar SOLO subtítulos en formato VTT
+    # --- AQUÍ ESTÁ EL TRUCO ---
     ydl_opts = {
-        'skip_download': True,      # No bajar el video
-        'writesubtitles': True,     # Bajar subs manuales
-        'writeautomaticsub': True,  # Bajar subs auto-generados
-        'subtitleslangs': ['es', 'es-419', 'en'], # Preferencia de idiomas
-        'outtmpl': f'/tmp/{video_id}', # Guardar en carpeta temporal
+        'skip_download': True,
+        'writesubtitles': True,
+        'writeautomaticsub': True,
+        'subtitleslangs': ['es', 'es-419', 'en'],
+        'outtmpl': f'/tmp/{video_id}',
         'quiet': True,
+        # Forzamos a que use el cliente de TV o IOS que molestan menos con el login
+        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         
-        # Buscar el archivo que se bajó (puede terminar en .es.vtt, .en.vtt, etc)
         files = glob.glob(f"/tmp/{video_id}*.vtt")
         if not files:
             print("DEBUG: yt-dlp no encontró ningún subtítulo.")
             return None
             
-        filename = files[0] # Agarramos el primero que haya
+        filename = files[0]
         
-        # Leemos y limpiamos el archivo VTT (quitamos tiempos y metadatos)
         clean_text = []
         with open(filename, 'r', encoding='utf-8') as f:
             lines = f.readlines()
             for line in lines:
-                # Ignorar encabezados, tiempos (-->) y líneas vacías
                 if '-->' in line or line.strip() == '' or line.startswith('WEBVTT') or line.strip().isdigit():
                     continue
-                # Eliminar etiquetas raras como <c>
                 line = line.replace('<c>', '').replace('</c>', '').strip()
-                # Evitar duplicados consecutivos (común en subs auto)
                 if clean_text and clean_text[-1] == line:
                     continue
                 clean_text.append(line)
         
-        # Borramos el archivo temporal
         os.remove(filename)
-        
         return " ".join(clean_text)
 
     except Exception as e:
@@ -129,8 +120,6 @@ def main():
                 continue
 
             print(f"[NUEVO] Procesando: {vtitle}")
-            
-            # USAMOS LA NUEVA FUNCIÓN
             text = get_transcript_ytdlp(vid)
             
             if not text:
