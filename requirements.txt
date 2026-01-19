@@ -1,5 +1,5 @@
 google-api-python-client
-youtube-transcript-api
+youtube-transcript-api>=0.6.1
 google-generativeai
 sqlalchemy
 psycopg2-binary
