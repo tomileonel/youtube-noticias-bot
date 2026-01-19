@@ -1,12 +1,13 @@
 import os
+import re  # <--- IMPORTANTE PARA LIMPIAR EMOJIS
 import logging
-# --- VERIFICACIÓN DE VERSIÓN (EL CHIVATO) ---
+# --- CHIVATO DE VERSIÓN ---
 import pkg_resources
 try:
     ver = pkg_resources.get_distribution("youtube-transcript-api").version
-    print(f"✅ VERSIÓN INSTALADA DE YOUTUBE-API: {ver}")
+    print(f"✅ VERSIÓN INSTALADA: {ver}")
 except:
-    print("⚠️ NO SE PUDO VERIFICAR LA VERSIÓN")
+    print("⚠️ NO SE PUDO VERIFICAR VERSIÓN")
 
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -15,7 +16,6 @@ from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
-# Configuración
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
@@ -43,6 +43,17 @@ Session = sessionmaker(bind=engine)
 youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
+# --- NUEVA FUNCIÓN PARA BORRAR EMOJIS ---
+def limpiar_titulo(texto):
+    # Esta expresión regular deja solo:
+    # - Letras y Números (\w)
+    # - Espacios (\s)
+    # - Caracteres en español (Á-ÿ)
+    # - Puntuación básica (.,!?-:;)
+    texto_limpio = re.sub(r'[^\w\s\u00C0-\u00FF.,!¡?¿\-:;"\']', '', texto)
+    # Elimina espacios dobles que puedan quedar
+    return re.sub(r'\s+', ' ', texto_limpio).strip()
+
 def get_latest_videos(channel_id):
     try:
         request = youtube.search().list(part="snippet", channelId=channel_id, maxResults=5, order="date", type="video")
@@ -55,17 +66,13 @@ def get_latest_videos(channel_id):
 def get_transcript(video_id):
     print(f"DEBUG: Buscando subtítulos para {video_id}...")
     try:
-        # Esto fallaba antes porque la librería era vieja. Ahora debería funcionar.
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
         try:
-            # Prioridad: Español o Inglés
             transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
         except:
-            # Si no, el que sea (autogenerado)
-            print("DEBUG: Usando subtítulos autogenerados...")
+            print("DEBUG: Usando autogenerados...")
             transcript = next(iter(transcript_list))
-            
+        
         fetched = transcript.fetch()
         return " ".join([i['text'] for i in fetched])
     except Exception as e:
@@ -95,22 +102,26 @@ def main():
         print(f"Analizando {len(videos)} videos recientes...")
 
         for v in videos:
-            vid, vtitle = v['id'], v['title']
+            vid, vtitle_raw = v['id'], v['title']
+            
+            # LIMPIEZA DE TÍTULO AQUÍ
+            vtitle_clean = limpiar_titulo(vtitle_raw)
 
             if session.query(VideoNoticia).filter_by(id=vid).first():
-                print(f"[YA EXISTE] {vtitle}")
+                print(f"[YA EXISTE] {vtitle_clean}")
                 continue
 
-            print(f"[NUEVO] Procesando: {vtitle}")
+            print(f"[NUEVO] Procesando: {vtitle_clean}")
             text = get_transcript(vid)
             
             if not text:
                 print(" -- Saltando (Sin audio/texto)")
                 continue
 
-            html = generate_news(text, vtitle)
+            html = generate_news(text, vtitle_clean)
             if html:
-                post = VideoNoticia(id=vid, titulo=vtitle, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
+                # Guardamos con el título limpio
+                post = VideoNoticia(id=vid, titulo=vtitle_clean, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
                 session.add(post)
                 session.commit()
                 print(" -- ¡GUARDADO EN BD!")
