@@ -1,0 +1,5 @@
+google-api-python-client
+youtube-transcript-api
+google-generativeai
+sqlalchemy
+psycopg2-binary
