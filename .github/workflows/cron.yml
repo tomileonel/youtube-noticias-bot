@@ -10,23 +10,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
       
-      - name: Instalación Local y Cookies
+      - name: Instalar Librerías
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          # Instalamos la librería en la carpeta local para evitar versiones viejas
-          pip install --target . youtube-transcript-api==0.6.3
           
       - name: Correr Bot
         env:
-          # --- ESTA ES LA LÍNEA QUE FALTABA ---
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
-          # ------------------------------------
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}

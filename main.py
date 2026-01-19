@@ -2,12 +2,9 @@ import os
 import sys
 import re
 import logging
-
-# Truco de instalación local
-sys.path.insert(0, os.getcwd())
-
+import glob
+import yt_dlp  # LIBRERÍA NUEVA
 from googleapiclient.discovery import build
-from youtube_transcript_api import YouTubeTranscriptApi
 import google.generativeai as genai
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -15,19 +12,18 @@ from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 
-# --- CONFIGURACIÓN DE COOKIES (LA CLAVE DEL ÉXITO) ---
+# --- 1. CONFIGURACIÓN DE COOKIES ---
 COOKIES_FILE = "cookies.txt"
-cookies_content = os.getenv('YOUTUBE_COOKIES')
+cookies_env = os.getenv('YOUTUBE_COOKIES')
 
-if cookies_content:
-    # Creamos el archivo físico de cookies para que la librería lo use
+if cookies_env:
     with open(COOKIES_FILE, "w") as f:
-        f.write(cookies_content)
-    print("✅ Cookies cargadas correctamente.")
+        f.write(cookies_env)
+    print("✅ Cookies cargadas desde el Secreto.")
 else:
-    print("⚠️ ADVERTENCIA: No se encontró el secreto YOUTUBE_COOKIES. Algunos videos fallarán.")
+    print("⚠️ ADVERTENCIA: No hay cookies. Es probable que falle con videos sensibles.")
 
-# --- BD ---
+# --- 2. BASE DE DATOS ---
 db_string = os.getenv('DATABASE_URL')
 if db_string and db_string.startswith("postgres://"):
     db_string = db_string.replace("postgres://", "postgresql://", 1)
@@ -47,7 +43,7 @@ class VideoNoticia(Base):
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# --- APIS ---
+# --- 3. APIS ---
 youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
@@ -64,26 +60,66 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-def get_transcript(video_id):
-    print(f"DEBUG: Buscando subtítulos para {video_id}...")
+# --- 4. FUNCIÓN MAESTRA CON YT-DLP ---
+def get_transcript_ytdlp(video_id):
+    print(f"DEBUG: Intentando descargar subtítulos para {video_id} con yt-dlp...")
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    # Configuración para descargar SOLO texto (sin video)
+    ydl_opts = {
+        'skip_download': True,      # No bajar video
+        'writesubtitles': True,     # Bajar subs manuales
+        'writeautomaticsub': True,  # Bajar subs auto
+        'subtitleslangs': ['es', 'es-419', 'en'], # Idiomas
+        'outtmpl': f'/tmp/{video_id}', # Guardar en carpeta temporal
+        'quiet': True,
+        # Simulamos ser Android para evitar bloqueos
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+    }
+
+    # Si tenemos cookies, se las pasamos
+    if os.path.exists(COOKIES_FILE):
+        ydl_opts['cookiefile'] = COOKIES_FILE
+
     try:
-        # AQUI USAMOS LAS COOKIES PARA SALTAR EL BLOQUEO
-        # Si existe el archivo cookies.txt, lo usa. Si no, intenta sin él.
-        cookies_path = COOKIES_FILE if os.path.exists(COOKIES_FILE) else None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
         
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookies_path)
+        # Buscar el archivo generado (puede ser .vtt o .srv3)
+        files = glob.glob(f"/tmp/{video_id}*")
+        if not files:
+            print("❌ ERROR: yt-dlp terminó pero no generó archivo de subtítulos.")
+            return None
+            
+        filename = files[0] # Agarramos el primero que haya
+        print(f"DEBUG: Archivo descargado: {filename}")
         
-        try:
-            transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
-        except:
-            print("DEBUG: Usando autogenerados...")
-            transcript = next(iter(transcript_list))
+        # Leemos y limpiamos el archivo (quitamos tiempos y basura)
+        clean_text = []
+        with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+            for line in lines:
+                # Filtrar líneas de tiempo, cabeceras y vacías
+                line = line.strip()
+                if not line: continue
+                if '-->' in line: continue
+                if line.startswith('WEBVTT') or line.startswith('Kind:') or line.startswith('Language:'): continue
+                if line.isdigit(): continue
+                
+                # Quitar etiquetas raras <c> y duplicados
+                line = re.sub(r'<[^>]+>', '', line)
+                if clean_text and clean_text[-1] == line:
+                    continue
+                clean_text.append(line)
         
-        fetched = transcript.fetch()
-        return " ".join([i['text'] for i in fetched])
+        # Borramos el archivo temporal
+        for f in files:
+            if os.path.exists(f): os.remove(f)
         
+        return " ".join(clean_text)
+
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"❌ ERROR CRÍTICO YT-DLP: {e}")
         return None
 
 def generate_news(text, title):
@@ -117,10 +153,12 @@ def main():
                 continue
 
             print(f"[NUEVO] Procesando: {vtitle_clean}")
-            text = get_transcript(vid)
+            
+            # USAMOS LA NUEVA FUNCIÓN
+            text = get_transcript_ytdlp(vid)
             
             if not text:
-                print(" -- Saltando (Bloqueado o sin texto)")
+                print(" -- Saltando (Imposible obtener texto)")
                 continue
 
             html = generate_news(text, vtitle_clean)
@@ -133,7 +171,7 @@ def main():
     except Exception as e:
         print(f"Error General: {e}")
     finally:
-        # Borrar cookies al terminar por seguridad
+        # Borrar cookies al cerrar
         if os.path.exists(COOKIES_FILE):
             os.remove(COOKIES_FILE)
         session.close()

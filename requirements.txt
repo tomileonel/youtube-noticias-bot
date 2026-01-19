@@ -1,6 +1,5 @@
+yt-dlp
 google-generativeai
 sqlalchemy
 psycopg2-binary
 google-api-python-client
-requests
-defusedxml
