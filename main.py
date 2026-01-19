@@ -1,15 +1,13 @@
 import os
 import re
 import logging
-# --- VERIFICACIÓN DE VERSIÓN ---
-import pkg_resources
-try:
-    ver = pkg_resources.get_distribution("youtube-transcript-api").version
-    print(f"✅ VERSsIÓN INSTALADA: {ver}")
-except:
-    print("⚠️ NO SE PUDO VERIFICAR VERSIÓN")
+import sys
+
+# Agregamos la carpeta actual al sistema para que encuentre la librería clonada
+sys.path.append(os.getcwd())
 
 from googleapiclient.discovery import build
+# Ahora esto importará la carpeta que descargaremos manualmente
 from youtube_transcript_api import YouTubeTranscriptApi
 import google.generativeai as genai
 from sqlalchemy import create_engine, Column, String, Text, DateTime
@@ -17,7 +15,6 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
 
 # --- BD ---
 db_string = os.getenv('DATABASE_URL')
@@ -44,7 +41,6 @@ youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
 def limpiar_titulo(texto):
-    # Borra emojis y símbolos raros, deja letras, números y puntuación
     texto_limpio = re.sub(r'[^\w\s\u00C0-\u00FF.,!¡?¿\-:;"\']', '', texto)
     return re.sub(r'\s+', ' ', texto_limpio).strip()
 
@@ -60,7 +56,7 @@ def get_latest_videos(channel_id):
 def get_transcript(video_id):
     print(f"DEBUG: Buscando subtítulos para {video_id}...")
     try:
-        # Aquí es donde fallaba antes. Con la instalación forzada funcionará.
+        # Al usar la versión clonada, esto SÍ tiene list_transcripts
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         try:
             transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
