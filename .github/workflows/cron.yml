@@ -15,28 +15,18 @@ jobs:
         with:
           python-version: '3.10'
       
-      - name: Instalación Manual y Dependencias
+      - name: Instalación Local (El Truco Definitivo)
         run: |
           pip install --upgrade pip
           
-          # 1. Borramos cualquier rastro previo
-          pip uninstall -y youtube-transcript-api || true
-          rm -rf youtube_transcript_api
-          
-          # 2. Instalamos las dependencias del archivo (incluye defusedxml)
+          # 1. Instalamos las dependencias normales
           pip install -r requirements.txt
           
-          # 3. Clonamos la librería OFICIAL (Versión 2025)
-          git clone https://github.com/jdepoix/youtube-transcript-api.git temp_repo
+          # 2. INSTALAMOS LA LIBRERÍA EN LA CARPETA ACTUAL (Target)
+          # Esto crea una carpeta 'youtube_transcript_api' justo al lado de main.py
+          pip install --target . youtube-transcript-api==0.6.3
           
-          # 4. Movemos la carpeta de la librería a la raíz para que main.py la vea
-          mv temp_repo/youtube_transcript_api .
-          
-          # 5. Limpiamos la basura
-          rm -rf temp_repo
-          
-          # Comprobación visual
-          echo "La carpeta youtube_transcript_api debería estar aquí abajo:"
+          # 3. Verificamos que la carpeta existe
           ls -d youtube_transcript_api
           
       - name: Correr Bot

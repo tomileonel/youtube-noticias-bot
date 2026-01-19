@@ -1,13 +1,19 @@
 import os
+import sys
 import re
 import logging
-import sys
 
-# Agregamos la carpeta actual al sistema para que encuentre la librería clonada
-sys.path.append(os.getcwd())
+# TRUCO: Forzamos a Python a mirar en la carpeta actual primero
+sys.path.insert(0, os.getcwd())
+
+# Chivato de versión
+try:
+    import youtube_transcript_api
+    print(f"📁 LIBRERÍA CARGADA DESDE: {youtube_transcript_api.__file__}")
+except:
+    pass
 
 from googleapiclient.discovery import build
-# Ahora esto importará la carpeta que descargaremos manualmente
 from youtube_transcript_api import YouTubeTranscriptApi
 import google.generativeai as genai
 from sqlalchemy import create_engine, Column, String, Text, DateTime
@@ -56,7 +62,7 @@ def get_latest_videos(channel_id):
 def get_transcript(video_id):
     print(f"DEBUG: Buscando subtítulos para {video_id}...")
     try:
-        # Al usar la versión clonada, esto SÍ tiene list_transcripts
+        # AQUI ES DONDE OCURRE LA MAGIA
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         try:
             transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
