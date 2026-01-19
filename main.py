@@ -3,15 +3,8 @@ import sys
 import re
 import logging
 
-# TRUCO: Forzamos a Python a mirar en la carpeta actual primero
+# Truco de instalación local
 sys.path.insert(0, os.getcwd())
-
-# Chivato de versión
-try:
-    import youtube_transcript_api
-    print(f"📁 LIBRERÍA CARGADA DESDE: {youtube_transcript_api.__file__}")
-except:
-    pass
 
 from googleapiclient.discovery import build
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -21,6 +14,18 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
+
+# --- CONFIGURACIÓN DE COOKIES (LA CLAVE DEL ÉXITO) ---
+COOKIES_FILE = "cookies.txt"
+cookies_content = os.getenv('YOUTUBE_COOKIES')
+
+if cookies_content:
+    # Creamos el archivo físico de cookies para que la librería lo use
+    with open(COOKIES_FILE, "w") as f:
+        f.write(cookies_content)
+    print("✅ Cookies cargadas correctamente.")
+else:
+    print("⚠️ ADVERTENCIA: No se encontró el secreto YOUTUBE_COOKIES. Algunos videos fallarán.")
 
 # --- BD ---
 db_string = os.getenv('DATABASE_URL')
@@ -62,8 +67,12 @@ def get_latest_videos(channel_id):
 def get_transcript(video_id):
     print(f"DEBUG: Buscando subtítulos para {video_id}...")
     try:
-        # AQUI ES DONDE OCURRE LA MAGIA
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # AQUI USAMOS LAS COOKIES PARA SALTAR EL BLOQUEO
+        # Si existe el archivo cookies.txt, lo usa. Si no, intenta sin él.
+        cookies_path = COOKIES_FILE if os.path.exists(COOKIES_FILE) else None
+        
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookies_path)
+        
         try:
             transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
         except:
@@ -72,8 +81,9 @@ def get_transcript(video_id):
         
         fetched = transcript.fetch()
         return " ".join([i['text'] for i in fetched])
+        
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"❌ ERROR: {e}")
         return None
 
 def generate_news(text, title):
@@ -110,7 +120,7 @@ def main():
             text = get_transcript(vid)
             
             if not text:
-                print(" -- Saltando (Sin audio/texto)")
+                print(" -- Saltando (Bloqueado o sin texto)")
                 continue
 
             html = generate_news(text, vtitle_clean)
@@ -123,6 +133,9 @@ def main():
     except Exception as e:
         print(f"Error General: {e}")
     finally:
+        # Borrar cookies al terminar por seguridad
+        if os.path.exists(COOKIES_FILE):
+            os.remove(COOKIES_FILE)
         session.close()
 
 if __name__ == "__main__":
