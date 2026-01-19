@@ -1,7 +1,7 @@
 yt-dlp
 openai-whisper
+torch
+google-api-python-client
 google-generativeai
 sqlalchemy
 psycopg2-binary
-google-api-python-client
-requests

@@ -1,38 +1,37 @@
-name: Bot de Noticias Youtube
+name: YouTube → Noticias
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 jobs:
-  run-script:
+  run:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-          cache: 'pip'
 
-      # --- PASO OBLIGATORIO: Instalar FFmpeg para el audio ---
-      - name: Instalar FFmpeg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Instalar Librerías
+      - name: Install Python deps
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          
-      - name: Correr Bot
+
+      - name: Run script
         env:
-          # Si tienes cookies úsalas, si no, yt-dlp intentará sin ellas
-          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python main.py
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: |
+          python main.py
