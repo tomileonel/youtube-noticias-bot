@@ -15,16 +15,23 @@ jobs:
         with:
           python-version: '3.10'
       
-      - name: Instalación desde la Fuente (Nuclear)
+      - name: Instalación Manual (Bypassing PIP)
         run: |
           pip install --upgrade pip
-          # 1. Instalamos las librerías normales
-          pip install google-generativeai sqlalchemy psycopg2-binary google-api-python-client
+          # 1. Instalamos las demás librerías
+          pip install -r requirements.txt
           
-          # 2. AQUÍ ESTÁ EL TRUCO:
-          # No usamos el nombre, usamos la dirección exacta del código fuente oficial.
-          # Esto evita que descargue la versión "1.2.3" falsa.
-          pip install git+https://github.com/jdepoix/youtube-transcript-api.git
+          # 2. DESCARGAMOS EL CÓDIGO FUENTE DE LA LIBRERÍA MANUALMENTE
+          git clone https://github.com/jdepoix/youtube-transcript-api.git temp_library
+          
+          # 3. MOVEMOS LA CARPETA INTERNA A LA RAÍZ (Aquí está el truco)
+          mv temp_library/youtube_transcript_api .
+          
+          # 4. Borramos lo que sobra
+          rm -rf temp_library
+          
+          # Confirmamos que la carpeta está ahí
+          ls -F
           
       - name: Correr Bot
         env:
