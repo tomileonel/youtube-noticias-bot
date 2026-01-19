@@ -57,20 +57,46 @@ def get_latest_videos(channel_id):
         return []
 
 def get_transcript(video_id):
-    """Versión robusta: busca manuales, auto, español e inglés"""
+    """
+    Versión DEPURADA: Intenta forzar la obtención de subtítulos 
+    e imprime el error real si falla.
+    """
+    print(f"DEBUG: Intentando sacar subtítulos para {video_id}...")
     try:
+        # 1. Obtenemos el objeto que gestiona los subtítulos
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        # DEBUG: Ver qué idiomas detectó la API
+        print(f"DEBUG: Idiomas detectados: {[t.language_code for t in transcript_list]}")
+
+        # 2. Estrategia de Selección:
+        # Intentamos encontrar uno preferido, si no, agarramos el primero que venga.
+        transcript = None
+        
         try:
-            # Prioridad: Español, Español Latino, Inglés
+            # Busca prioridad: Español, Latino, Inglés (Manuales o Generados)
             transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
+            print(f"DEBUG: Encontrado subtítulo preferido: {transcript.language_code}")
         except:
-            # Si falla, agarra cualquiera (autogenerado)
-            transcript = next(iter(transcript_list))
-            
+            # Si no hay preferidos, iteramos y agarramos el primero disponible (Forzado)
+            print("DEBUG: No hay español/inglés. Buscando CUALQUIER otro...")
+            for t in transcript_list:
+                transcript = t
+                break # Agarramos el primero y salimos
+        
+        if not transcript:
+            print("DEBUG: La lista de transcripciones estaba vacía.")
+            return None
+
+        # 3. Descargar texto
         fetched = transcript.fetch()
-        return " ".join([i['text'] for i in fetched])
+        full_text = " ".join([i['text'] for i in fetched])
+        return full_text
+
     except Exception as e:
-        logger.warning(f"No se pudo extraer texto del video {video_id}: {e}")
+        # AQUÍ ESTÁ LA CLAVE: Imprimimos el error real
+        print(f" ERROR FATAL EN SUBTITULOS: {str(e)}")
+        # Si el error es "Cookies required", es que YouTube bloqueó la IP de GitHub.
         return None
 
 def generate_news(text, title):
