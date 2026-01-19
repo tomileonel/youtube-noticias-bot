@@ -1,9 +1,16 @@
 import os
-import glob
 import logging
-import yt_dlp
-import google.generativeai as genai
+# --- VERIFICACIÓN DE VERSIÓN (EL CHIVATO) ---
+import pkg_resources
+try:
+    ver = pkg_resources.get_distribution("youtube-transcript-api").version
+    print(f"✅ VERSIÓN INSTALADA DE YOUTUBE-API: {ver}")
+except:
+    print("⚠️ NO SE PUDO VERIFICAR LA VERSIÓN")
+
 from googleapiclient.discovery import build
+from youtube_transcript_api import YouTubeTranscriptApi
+import google.generativeai as genai
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
@@ -45,49 +52,24 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-def get_transcript_ytdlp(video_id):
-    print(f"DEBUG: Intentando descarga con yt-dlp para {video_id}...")
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    
-    # --- AQUÍ ESTÁ EL TRUCO ---
-    ydl_opts = {
-        'skip_download': True,
-        'writesubtitles': True,
-        'writeautomaticsub': True,
-        'subtitleslangs': ['es', 'es-419', 'en'],
-        'outtmpl': f'/tmp/{video_id}',
-        'quiet': True,
-        # Forzamos a que use el cliente de TV o IOS que molestan menos con el login
-        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
-    }
-
+def get_transcript(video_id):
+    print(f"DEBUG: Buscando subtítulos para {video_id}...")
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        # Esto fallaba antes porque la librería era vieja. Ahora debería funcionar.
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
-        files = glob.glob(f"/tmp/{video_id}*.vtt")
-        if not files:
-            print("DEBUG: yt-dlp no encontró ningún subtítulo.")
-            return None
+        try:
+            # Prioridad: Español o Inglés
+            transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
+        except:
+            # Si no, el que sea (autogenerado)
+            print("DEBUG: Usando subtítulos autogenerados...")
+            transcript = next(iter(transcript_list))
             
-        filename = files[0]
-        
-        clean_text = []
-        with open(filename, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            for line in lines:
-                if '-->' in line or line.strip() == '' or line.startswith('WEBVTT') or line.strip().isdigit():
-                    continue
-                line = line.replace('<c>', '').replace('</c>', '').strip()
-                if clean_text and clean_text[-1] == line:
-                    continue
-                clean_text.append(line)
-        
-        os.remove(filename)
-        return " ".join(clean_text)
-
+        fetched = transcript.fetch()
+        return " ".join([i['text'] for i in fetched])
     except Exception as e:
-        print(f"ERROR YT-DLP: {e}")
+        print(f"ERROR: {e}")
         return None
 
 def generate_news(text, title):
@@ -120,7 +102,7 @@ def main():
                 continue
 
             print(f"[NUEVO] Procesando: {vtitle}")
-            text = get_transcript_ytdlp(vid)
+            text = get_transcript(vid)
             
             if not text:
                 print(" -- Saltando (Sin audio/texto)")
