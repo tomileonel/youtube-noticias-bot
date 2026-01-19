@@ -15,22 +15,18 @@ jobs:
         with:
           python-version: '3.10'
       
-      - name: Instalación Local (El Truco Definitivo)
+      - name: Instalación Local y Cookies
         run: |
           pip install --upgrade pip
-          
-          # 1. Instalamos las dependencias normales
           pip install -r requirements.txt
-          
-          # 2. INSTALAMOS LA LIBRERÍA EN LA CARPETA ACTUAL (Target)
-          # Esto crea una carpeta 'youtube_transcript_api' justo al lado de main.py
+          # Instalamos la librería en la carpeta local para evitar versiones viejas
           pip install --target . youtube-transcript-api==0.6.3
-          
-          # 3. Verificamos que la carpeta existe
-          ls -d youtube_transcript_api
           
       - name: Correr Bot
         env:
+          # --- ESTA ES LA LÍNEA QUE FALTABA ---
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+          # ------------------------------------
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
