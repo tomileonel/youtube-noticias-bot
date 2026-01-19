@@ -1,7 +1,7 @@
 import os
-import re  # <--- IMPORTANTE PARA LIMPIAR EMOJIS
+import re
 import logging
-# --- CHIVATO DE VERSIÓN ---
+# --- VERIFICACIÓN DE VERSIÓN ---
 import pkg_resources
 try:
     ver = pkg_resources.get_distribution("youtube-transcript-api").version
@@ -43,15 +43,9 @@ Session = sessionmaker(bind=engine)
 youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-# --- NUEVA FUNCIÓN PARA BORRAR EMOJIS ---
 def limpiar_titulo(texto):
-    # Esta expresión regular deja solo:
-    # - Letras y Números (\w)
-    # - Espacios (\s)
-    # - Caracteres en español (Á-ÿ)
-    # - Puntuación básica (.,!?-:;)
+    # Borra emojis y símbolos raros, deja letras, números y puntuación
     texto_limpio = re.sub(r'[^\w\s\u00C0-\u00FF.,!¡?¿\-:;"\']', '', texto)
-    # Elimina espacios dobles que puedan quedar
     return re.sub(r'\s+', ' ', texto_limpio).strip()
 
 def get_latest_videos(channel_id):
@@ -66,6 +60,7 @@ def get_latest_videos(channel_id):
 def get_transcript(video_id):
     print(f"DEBUG: Buscando subtítulos para {video_id}...")
     try:
+        # Aquí es donde fallaba antes. Con la instalación forzada funcionará.
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         try:
             transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
@@ -103,8 +98,6 @@ def main():
 
         for v in videos:
             vid, vtitle_raw = v['id'], v['title']
-            
-            # LIMPIEZA DE TÍTULO AQUÍ
             vtitle_clean = limpiar_titulo(vtitle_raw)
 
             if session.query(VideoNoticia).filter_by(id=vid).first():
@@ -120,7 +113,6 @@ def main():
 
             html = generate_news(text, vtitle_clean)
             if html:
-                # Guardamos con el título limpio
                 post = VideoNoticia(id=vid, titulo=vtitle_clean, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
                 session.add(post)
                 session.commit()

@@ -11,16 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      # NO USAMOS CACHÉ para obligar a descargar todo nuevo siempre
+      # NO usamos caché para evitar problemas de versiones viejas
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
       
-      - name: Instalación Limpia
+      - name: Instalación Forzada
         run: |
           pip install --upgrade pip
-          # Forzamos la reinstalación ignorando lo que tenga guardado
-          pip install --force-reinstall -r requirements.txt
+          # Esta línea es la MAGIA: Borra lo viejo e instala lo nuevo a la fuerza
+          pip install --force-reinstall -v "youtube-transcript-api>=0.6.2" -r requirements.txt
           
       - name: Correr Bot
         env:
