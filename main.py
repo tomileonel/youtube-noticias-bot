@@ -52,9 +52,18 @@ def get_latest_video(channel_id):
 
 def get_transcript(video_id):
     try:
-        t = YouTubeTranscriptApi.get_transcript(video_id, languages=['es', 'es-419', 'en'])
-        return " ".join([i['text'] for i in t])
-    except:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        try:
+            transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
+        except:
+            transcript = next(iter(transcript_list))
+        fetched_transcript = transcript.fetch()
+        full_text = " ".join([i['text'] for i in fetched_transcript])
+        return full_text
+
+    except Exception as e:
+        logger.error(f"FALLO SUBTITULOS - ID: {video_id} - ERROR: {str(e)}")
         return None
 
 def generate_news(text, title):
