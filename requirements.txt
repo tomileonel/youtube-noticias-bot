@@ -1,5 +1,5 @@
-google-api-python-client
-youtube-transcript-api>=0.6.1
+yt-dlp
 google-generativeai
 sqlalchemy
 psycopg2-binary
+google-api-python-client
