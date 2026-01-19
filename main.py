@@ -1,29 +1,25 @@
 import os
-import sys
 import re
 import logging
 import glob
 import yt_dlp
-from googleapiclient.discovery import build
+import whisper
 import google.generativeai as genai
+from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 
-# --- 1. CONFIGURACIÓN DE COOKIES ---
+# --- CONFIGURACIÓN ---
 COOKIES_FILE = "cookies.txt"
 cookies_env = os.getenv('YOUTUBE_COOKIES')
-
 if cookies_env:
     with open(COOKIES_FILE, "w") as f:
         f.write(cookies_env)
-    print("✅ Cookies cargadas desde el Secreto.")
-else:
-    print("⚠️ ADVERTENCIA: No hay cookies. Fallará con videos sensibles.")
 
-# --- 2. BASE DE DATOS ---
+# --- BD ---
 db_string = os.getenv('DATABASE_URL')
 if db_string and db_string.startswith("postgres://"):
     db_string = db_string.replace("postgres://", "postgresql://", 1)
@@ -43,7 +39,7 @@ class VideoNoticia(Base):
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# --- 3. APIS ---
+# --- APIS ---
 youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
@@ -60,74 +56,61 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- 4. FUNCIÓN MAESTRA CON YT-DLP (CORREGIDA) ---
-def get_transcript_ytdlp(video_id):
-    print(f"DEBUG: Intentando descargar subtítulos para {video_id} con yt-dlp...")
+# --- LA SOLUCIÓN DEFINITIVA: AUDIO -> TEXTO (IA) ---
+def transcribir_con_ia(video_id):
+    print(f"DEBUG: 🤖 Generando subtítulos con IA para {video_id}...")
+    
+    output_filename = f"audio_{video_id}"
     url = f"https://www.youtube.com/watch?v={video_id}"
     
+    # 1. Descargar Audio
     ydl_opts = {
-        'skip_download': True,
-        'writesubtitles': True,
-        'writeautomaticsub': True,
-        'subtitleslangs': ['es', 'es-419', 'en'],
-        'outtmpl': f'/tmp/{video_id}',
+        'format': 'bestaudio/best',
+        'outtmpl': output_filename,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '128',
+        }],
         'quiet': True,
-        'ignoreerrors': True, # Para que no explote si falla uno
-        # CAMBIO CLAVE: Quitamos 'extractor_args' (Android)
-        # AGREGAMOS: User Agent para parecer un navegador de verdad en PC
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'no_warnings': True,
     }
-
-    # Pasamos las cookies explícitamente
+    
     if os.path.exists(COOKIES_FILE):
         ydl_opts['cookiefile'] = COOKIES_FILE
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        
-        # Buscar el archivo generado
-        files = glob.glob(f"/tmp/{video_id}*")
-        
-        # Filtrar solo archivos de texto (evitar basura si bajó algo más)
-        valid_files = [f for f in files if f.endswith('.vtt') or f.endswith('.srv3') or f.endswith('.ttml')]
-        
-        if not valid_files:
-            print(f"❌ ERROR: No se generaron subtítulos para {video_id}.")
-            return None
             
-        filename = valid_files[0]
-        print(f"DEBUG: Procesando archivo: {filename}")
+        final_audio = f"{output_filename}.mp3"
         
-        clean_text = []
-        with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
-            for line in lines:
-                line = line.strip()
-                if not line: continue
-                if '-->' in line: continue
-                if line.startswith('WEBVTT') or line.startswith('Kind:') or line.startswith('Language:'): continue
-                if line.isdigit(): continue
-                
-                line = re.sub(r'<[^>]+>', '', line)
-                if clean_text and clean_text[-1] == line:
-                    continue
-                clean_text.append(line)
+        if not os.path.exists(final_audio):
+            print("❌ Error: No se descargó el audio.")
+            return None
+
+        # 2. Transcribir usando Whisper
+        print("DEBUG: 🎧 La IA está escuchando el audio...")
+        # Usamos 'tiny' porque es rápido y gratis. Para más precisión usar 'base'.
+        model = whisper.load_model("tiny") 
+        result = model.transcribe(final_audio)
+        texto_generado = result["text"]
         
-        # Limpieza de archivos temporales
-        for f in files:
-            if os.path.exists(f): os.remove(f)
+        # 3. Limpieza
+        os.remove(final_audio)
         
-        return " ".join(clean_text)
+        print(f"✅ Transcripción completada ({len(texto_generado)} caracteres)")
+        return texto_generado
 
     except Exception as e:
-        print(f"❌ ERROR CRÍTICO YT-DLP: {e}")
+        print(f"❌ Error en transcripción: {e}")
+        # Limpiar si quedó algo
+        if os.path.exists(f"{output_filename}.mp3"):
+            os.remove(f"{output_filename}.mp3")
         return None
 
 def generate_news(text, title):
-    if len(text) < 50: # Si el texto es muy corto, algo salió mal
-        return None
-        
+    if not text or len(text) < 50: return None
     model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
     Eres periodista. Crea noticia HTML para WordPress sobre: '{title}'.
@@ -159,10 +142,11 @@ def main():
 
             print(f"[NUEVO] Procesando: {vtitle_clean}")
             
-            text = get_transcript_ytdlp(vid)
+            # --- AQUÍ LLAMAMOS A LA IA ---
+            text = transcribir_con_ia(vid)
             
             if not text:
-                print(" -- Saltando (Bloqueado o sin texto)")
+                print(" -- Saltando (Falló la transcripción)")
                 continue
 
             html = generate_news(text, vtitle_clean)

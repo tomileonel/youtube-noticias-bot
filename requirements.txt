@@ -1,4 +1,5 @@
 yt-dlp
+openai-whisper
 google-generativeai
 sqlalchemy
 psycopg2-binary

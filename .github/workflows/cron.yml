@@ -10,10 +10,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      
+          cache: 'pip'
+
+      # --- PASO OBLIGATORIO: Instalar FFmpeg para el audio ---
+      - name: Instalar FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Instalar Librerías
         run: |
           pip install --upgrade pip
@@ -21,6 +29,7 @@ jobs:
           
       - name: Correr Bot
         env:
+          # Si tienes cookies úsalas, si no, yt-dlp intentará sin ellas
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
