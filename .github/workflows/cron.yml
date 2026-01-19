@@ -2,19 +2,35 @@ name: Bot de Noticias Youtube
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Ejecutar cada 30 min
-  workflow_dispatch:      # Botón manual
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+      
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Instalar requisitos
-        run: pip install --force-reinstall -v "youtube-transcript-api>=0.6.1" -r requirements.txt
+          cache: 'pip' # Intentamos usar caché para lo demás, pero...
+      
+      - name: Instalación Limpia y Forzada
+        run: |
+          pip install --upgrade pip
+          # 1. Instalamos las librerías generales
+          pip install google-api-python-client google-generativeai sqlalchemy psycopg2-binary
+          
+          # 2. FORZAMOS la desinstalación de cualquier versión vieja de youtube-api
+          pip uninstall -y youtube-transcript-api
+          
+          # 3. Instalamos explícitamente la versión moderna que SÍ tiene list_transcripts
+          pip install youtube-transcript-api==0.6.2
+          
+          # 4. Verificamos qué versión quedó instalada (se verá en los logs)
+          pip show youtube-transcript-api
+
       - name: Correr Bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
