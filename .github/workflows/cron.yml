@@ -22,7 +22,7 @@ jobs:
         run: pip install youtube-transcript-api==1.2.3
 
       - name: Run
-        run: python extractor_v2.py
+        run: python main.py
 
       - name: Upload
         uses: actions/upload-artifact@v4
