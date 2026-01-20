@@ -3,7 +3,7 @@ name: Bot de Noticias Youtube
 on:
   schedule:
     - cron: '*/30 * * * *'  # Se ejecuta cada 30 minutos
-  workflow_dispatch:        # Permite ejecutarlo manualmente con el botón
+  workflow_dispatch:        # Te deja probarlo manual con el botón
 
 jobs:
   run-script:
@@ -11,19 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      # Solo necesitamos Python
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      # VITAL: Instalar FFmpeg (Sin esto, Whisper falla)
-      - name: Instalar FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-      # Instalar lo que pusimos en requirements.txt
+      # NOTA: Ya no instalamos FFmpeg ni Tor porque solo procesamos texto.
+      
       - name: Instalar Librerías
         run: |
           pip install --upgrade pip
