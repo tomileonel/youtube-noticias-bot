@@ -1,8 +1,1 @@
 youtube-transcript-api
-<<<<<<< HEAD
-=======
-google-generativeai
-sqlalchemy
-psycopg2-binary
-google-api-python-client
->>>>>>> 79c213dd797c57e515f1497602fbef55bf89f125
