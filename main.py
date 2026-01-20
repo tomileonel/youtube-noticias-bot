@@ -1,21 +1,26 @@
 from youtube_transcript_api import YouTubeTranscriptApi
+import sys
 
-def ejecutar_cron():
-    video_id = "iMgYVJpQQv8" # Aquí puedes poner una lista si quieres
-    print(f"Iniciando extracción para: {video_id}")
+def ejecutar_rapido():
+    # Puedes cambiar el ID aquí
+    video_id = "iMgYVJpQQv8"
     
     try:
-        ytt_api = YouTubeTranscriptApi()
-        fetched_transcript = ytt_api.fetch(video_id, languages=['es', 'en'])
+        # Modo directo: Sin instancia previa para ahorrar tiempo
+        # Traemos el transcript de forma inmediata
+        data = YouTubeTranscriptApi.get_transcript(video_id, languages=['es', 'en'])
         
-        texto_final = " ".join([snippet.text for snippet in fetched_transcript])
+        # Generamos el texto
+        texto = " ".join([i['text'] for i in data])
         
-        with open(f"transcripcion_{video_id}.txt", "w", encoding="utf-8") as f:
-            f.write(texto_final)
-            
-        print("Finalizado con éxito.")
+        # Nombre de archivo simplificado
+        with open(f"resultado.txt", "w", encoding="utf-8") as f:
+            f.write(texto)
+        
+        print(f"Done: {video_id}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Fail: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    ejecutar_cron()
+    ejecutar_rapido()
