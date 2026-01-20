@@ -2,9 +2,12 @@ import os
 import re
 import logging
 import time
+import random
 import requests
+import yt_dlp
 import whisper
 import google.generativeai as genai
+from youtube_transcript_api import YouTubeTranscriptApi
 from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -53,104 +56,88 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- MÉTODO "CIRUJANO": API DE INVIDIOUS ---
-def descargar_desde_invidious(video_id):
-    print(f"DEBUG: 💉 Operando video {video_id} vía Invidious API...")
-    
-    # Lista de instancias activas de Invidious
-    # Estas URLs nos dan el JSON con los datos del video
-    instances = [
-        "https://inv.tux.pizza",
-        "https://invidious.jing.rocks",
-        "https://vid.uff.ink",
-        "https://yt.artemislena.eu",
-        "https://invidious.projectsegfau.lt",
-        "https://invidious.nerdvpn.de",
-        "https://inv.zzls.xyz"
-    ]
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+# --- PLAN A: OBTENER TRANSCRIPCIÓN DIRECTA (Sin Descarga) ---
+def obtener_texto_directo(video_id):
+    print(f"DEBUG: 📄 [PLAN A] Intentando obtener subtítulos existentes de {video_id}...")
+    try:
+        # Intenta obtener subtítulos en español o inglés (manuales o automáticos)
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['es', 'es-419', 'en'])
+        
+        # Unir todo el texto
+        full_text = " ".join([entry['text'] for entry in transcript])
+        print("   ✅ ¡Subtítulos encontrados! (Ahorramos descarga y Whisper)")
+        return full_text
+    except Exception:
+        print("   ❌ No hay subtítulos disponibles o bloqueado. Pasando al Plan B...")
+        return None
 
-    direct_audio_url = None
+# --- PLAN B: DESCARGA CON PROXIES ROTATIVOS (Audio + Whisper) ---
+def obtener_proxies_gratis():
+    # Obtiene una lista fresca de proxies gratuitos
+    try:
+        url = "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
+        r = requests.get(url)
+        proxies = r.text.strip().split('\n')
+        return [p.strip() for p in proxies if p.strip()]
+    except:
+        return []
 
-    # 1. Buscar una instancia que responda
-    for base_url in instances:
-        api_url = f"{base_url}/api/v1/videos/{video_id}"
-        print(f"   📡 Consultando: {base_url}...")
+def descargar_con_proxy(video_id):
+    print(f"DEBUG: 🎧 [PLAN B] Intentando descargar audio con Proxies...")
+    
+    proxies = obtener_proxies_gratis()
+    # Tomamos 5 proxies al azar para probar
+    proxies_to_try = random.sample(proxies, min(len(proxies), 10))
+    
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    output = f"audio_{video_id}"
+
+    for proxy_url in proxies_to_try:
+        print(f"   🛡️ Probando Proxy: {proxy_url}...")
+        
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output,
+            'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3'}],
+            'quiet': True,
+            'proxy': f"http://{proxy_url}", # Inyectamos el proxy
+            'socket_timeout': 10
+        }
         
         try:
-            response = requests.get(api_url, headers=headers, timeout=10)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
             
-            if response.status_code == 200:
-                data = response.json()
-                
-                # 2. Buscar el stream de audio dentro del JSON
-                # Invidious nos da varios formatos, buscamos 'audio'
-                if 'adaptiveFormats' in data:
-                    for fmt in data['adaptiveFormats']:
-                        # Buscamos audio/webm o audio/mp4
-                        if 'type' in fmt and 'audio' in fmt['type']:
-                            direct_audio_url = fmt['url']
-                            print("   ✅ ¡Enlace de audio encontrado!")
-                            break
-                
-                if direct_audio_url: break # Si encontramos link, salimos
-            
+            final_file = f"{output}.mp3"
+            if os.path.exists(final_file):
+                print("   ✅ ¡Descarga exitosa con Proxy!")
+                return final_file
         except Exception:
-            continue
+            continue # Si falla, probamos el siguiente
 
-    if not direct_audio_url:
-        print("❌ ERROR CRÍTICO: No se pudo extraer el audio de ninguna instancia.")
-        return None
+    print("❌ ERROR: Ningún proxy funcionó.")
+    return None
 
-    # 3. Descargar el archivo desde el enlace directo
-    output_filename = f"audio_{video_id}.webm" # Invidious suele dar webm, Whisper lo lee igual
-    print("DEBUG: ⬇️ Descargando stream de audio...")
+def procesar_video(video_id):
+    # 1. PLAN A: Texto directo
+    texto = obtener_texto_directo(video_id)
+    if texto: return texto
+
+    # 2. PLAN B: Descarga Audio con Proxy + Whisper
+    audio_file = descargar_con_proxy(video_id)
     
-    try:
-        with requests.get(direct_audio_url, stream=True, headers=headers) as r:
-            r.raise_for_status()
-            with open(output_filename, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        
-        # Verificar tamaño mínimo (10KB)
-        if os.path.getsize(output_filename) < 10000:
-            print("❌ Archivo vacío.")
-            return None
-            
-        return output_filename
-
-    except Exception as e:
-        print(f"❌ Error descargando: {e}")
-        return None
-
-def transcribir_y_generar(video_id):
-    # Paso 1: Descargar (Vía Invidious)
-    audio_file = descargar_desde_invidious(video_id)
-    
-    if not audio_file:
-        return None
+    if not audio_file: return None
 
     try:
-        # Paso 2: Transcribir (Whisper Local)
-        print("DEBUG: 🎧 Procesando audio con Whisper...")
-        model = whisper.load_model("tiny") 
+        print("   🗣️ Transcribiendo audio con Whisper...")
+        model = whisper.load_model("tiny")
         result = model.transcribe(audio_file)
-        texto_generado = result["text"]
         
-        # Limpiar
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
-            
-        return texto_generado
-
+        if os.path.exists(audio_file): os.remove(audio_file)
+        return result["text"]
     except Exception as e:
-        print(f"❌ Error Transcripción: {e}")
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
+        print(f"❌ Error Whisper: {e}")
+        if os.path.exists(audio_file): os.remove(audio_file)
         return None
 
 def generate_news(text, title):
@@ -186,10 +173,10 @@ def main():
 
             print(f"[NUEVO] Procesando: {vtitle_clean}")
             
-            text = transcribir_y_generar(vid)
+            text = procesar_video(vid)
             
             if not text:
-                print(" -- Saltando (Error)")
+                print(" -- Saltando (Imposible obtener info)")
                 continue
 
             html = generate_news(text, vtitle_clean)
