@@ -1,4 +1,3 @@
-pytubefix
 openai-whisper
 google-generativeai
 sqlalchemy

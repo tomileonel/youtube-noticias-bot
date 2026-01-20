@@ -2,8 +2,8 @@ name: Bot de Noticias Youtube
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *'  # Se ejecuta cada 30 minutos
+  workflow_dispatch:        # Permite ejecutarlo manualmente con el botón
 
 jobs:
   run-script:
@@ -11,22 +11,19 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      # Instalamos Node.js para ayudar a pytubefix con los tokens
-      - uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
+      # Solo necesitamos Python
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
           cache: 'pip'
 
-      # Instalamos FFmpeg para el audio
+      # VITAL: Instalar FFmpeg (Sin esto, Whisper falla)
       - name: Instalar FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
+      # Instalar lo que pusimos en requirements.txt
       - name: Instalar Librerías
         run: |
           pip install --upgrade pip

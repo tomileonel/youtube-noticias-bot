@@ -2,10 +2,9 @@ import os
 import re
 import logging
 import time
+import requests
 import whisper
 import google.generativeai as genai
-from pytubefix import YouTube
-from pytubefix.cli import on_progress
 from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -13,13 +12,18 @@ from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 
-# --- BASE DE DATOS ---
-db_string = os.getenv('DATABASE_URL')
-if db_string and db_string.startswith("postgres://"):
-    db_string = db_string.replace("postgres://", "postgresql://", 1)
-if not db_string: exit()
+# --- CONFIGURACIÓN ---
+CHANNEL_ID = os.getenv('CHANNEL_ID')
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
-engine = create_engine(db_string)
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+if not DATABASE_URL: exit()
+
+engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 
 class VideoNoticia(Base):
@@ -33,9 +37,8 @@ class VideoNoticia(Base):
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# --- APIS ---
-youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
 def limpiar_titulo(texto):
     texto_limpio = re.sub(r'[^\w\s\u00C0-\u00FF.,!¡?¿\-:;"\']', '', texto)
@@ -50,52 +53,108 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- NUEVO MÉTODO DE DESCARGA (Anti-Bloqueo) ---
-def descargar_y_transcribir(video_id):
-    print(f"DEBUG: 🚀 Intentando descargar {video_id} con Pytubefix...")
-    url = f"https://www.youtube.com/watch?v={video_id}"
+# --- DESCARGA VÍA RED COBALT (PROXY) ---
+def descargar_con_cobalt(video_id):
+    print(f"DEBUG: 🚀 Iniciando protocolo Cobalt para {video_id}...")
     
-    # Nombre temporal
-    output_audio = f"audio_{video_id}" 
+    # LISTA DE SERVIDORES ESPEJO (Si uno falla, probamos el siguiente)
+    cobalt_instances = [
+        "https://api.cobalt.tools/api/json",      # Oficial
+        "https://co.wuk.sh/api/json",             # Muy estable
+        "https://cobalt.oup.us/api/json",         # Alternativa US
+        "https://api.server.cobalt.tools/api/json",
+        "https://cobalt.xy24.eu/api/json",        # Europa
+        "https://cobalt.angelofall.net/api/json", 
+        "https://dl.khub.tel/api/json",
+        "https://cobalt.q14.rocks/api/json"
+    ]
+    
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    # Configuración: Pedir solo audio MP3
+    payload = {
+        "url": youtube_url,
+        "isAudioOnly": True,
+        "aFormat": "mp3"
+    }
+    
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+
+    direct_url = None
+
+    # 1. Bucle para encontrar un servidor que funcione
+    for instance in cobalt_instances:
+        try:
+            print(f"   📡 Probando servidor: {instance}")
+            response = requests.post(instance, json=payload, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Cobalt puede devolver la URL en distintos formatos
+                if 'url' in data:
+                    direct_url = data['url']
+                elif 'picker' in data:
+                    for item in data['picker']:
+                        if 'url' in item:
+                            direct_url = item['url']
+                            break
+                
+                if direct_url:
+                    print("   ✅ ¡Enlace conseguido!")
+                    break # Salimos del bucle
+            
+            # Si el status no es 200, probamos el siguiente
+        except Exception:
+            continue # Si da timeout, probamos el siguiente
+            
+    if not direct_url:
+        print("❌ ERROR CRÍTICO: Ningún servidor de Cobalt pudo descargar el video.")
+        return None
+
+    # 2. Descargar el archivo MP3 desde el enlace conseguido
+    output_filename = f"audio_{video_id}.mp3"
+    print("DEBUG: ⬇️ Descargando archivo de audio final...")
+    
+    try:
+        with requests.get(direct_url, stream=True) as r:
+            r.raise_for_status()
+            with open(output_filename, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return output_filename
+    except Exception as e:
+        print(f"❌ Error descargando el MP3: {e}")
+        return None
+
+def transcribir_y_generar(video_id):
+    # Paso 1: Descargar (Externo)
+    audio_file = descargar_con_cobalt(video_id)
+    
+    if not audio_file:
+        return None
 
     try:
-        # Usamos el cliente 'ANDROID' que suele saltarse el "Sign in"
-        yt = YouTube(url, client='ANDROID')
+        # Paso 2: Transcribir (Local en GitHub)
+        print("DEBUG: 🎧 Procesando audio con Whisper (IA)...")
+        model = whisper.load_model("tiny") 
+        result = model.transcribe(audio_file)
+        texto_generado = result["text"]
         
-        print(f"   Título: {yt.title}")
-        
-        # Obtener solo el audio (m4a/webm) con menor peso
-        audio_stream = yt.streams.get_audio_only()
-        
-        if not audio_stream:
-            print("❌ No se encontró audio disponible.")
-            return None
-
-        print("   ⬇️ Descargando...")
-        # Pytubefix descarga el archivo con su extensión correcta
-        archivo_descargado = audio_stream.download(filename=output_audio)
-        
-        # --- TRANSCRIPCIÓN ---
-        print("   🎧 Cargando Whisper (IA)...")
-        # Usamos 'tiny' para que no explote la memoria de GitHub
-        model = whisper.load_model("tiny")
-        
-        print("   🗣️ Transcribiendo...")
-        # Whisper acepta m4a/mp3/webm directamente
-        result = model.transcribe(archivo_descargado)
-        texto = result["text"]
-
-        # Limpiar archivo
-        if os.path.exists(archivo_descargado):
-            os.remove(archivo_descargado)
+        # Limpiar
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
             
-        return texto
+        return texto_generado
 
     except Exception as e:
-        print(f"❌ Error en Proceso: {e}")
-        # Limpieza de emergencia (pytube suele bajar .m4a)
-        if os.path.exists(f"{output_audio}.m4a"): os.remove(f"{output_audio}.m4a")
-        if os.path.exists(f"{output_audio}.mp4"): os.remove(f"{output_audio}.mp4")
+        print(f"❌ Error Transcripción: {e}")
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
         return None
 
 def generate_news(text, title):
@@ -131,10 +190,10 @@ def main():
 
             print(f"[NUEVO] Procesando: {vtitle_clean}")
             
-            text = descargar_y_transcribir(vid)
+            text = transcribir_y_generar(vid)
             
             if not text:
-                print(" -- Saltando (Error)")
+                print(" -- Saltando (No se pudo procesar)")
                 continue
 
             html = generate_news(text, vtitle_clean)
