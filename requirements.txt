@@ -1,1 +1,4 @@
-youtube-transcript-api
+requests
+psycopg2-binary
+google-generativeai
+python-dotenv
