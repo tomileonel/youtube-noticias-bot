@@ -1,5 +1,4 @@
-youtube-transcript-api
-google-generativeai
-sqlalchemy
+requests
 psycopg2-binary
-google-api-python-client
+google-generativeai
+python-dotenv

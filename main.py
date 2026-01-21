@@ -1,117 +1,126 @@
 import os
-import re
-import logging
+import requests
+import xml.etree.ElementTree as ET
+import psycopg2
 import google.generativeai as genai
-from youtube_transcript_api import YouTubeTranscriptApi
-from googleapiclient.discovery import build
-from sqlalchemy import create_engine, Column, String, Text, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base
-from datetime import datetime
+from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
+# Cargar variables del archivo .env
+load_dotenv()
 
-# --- CONFIG ---
-CHANNEL_ID = os.getenv('CHANNEL_ID')
-YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-DATABASE_URL = os.getenv('DATABASE_URL')
+# --- CONFIGURACIÓN SEGURA ---
+# Usamos .get() con un string vacío por defecto para evitar NameError
+DB_URL = os.getenv("DATABASE_URL", "").strip().rstrip('.')
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Listas de tokens
+SUPADATA_KEYS = [k.strip() for k in os.getenv("SUPADATA_KEYS", "").split(',') if k.strip()]
+GEMINI_KEYS = [k.strip() for k in os.getenv("GEMINI_KEYS", "").split(',') if k.strip()]
 
-engine = create_engine(DATABASE_URL)
-Base = declarative_base()
-
-class VideoNoticia(Base):
-    __tablename__ = 'noticias_youtube'
-    id = Column(String, primary_key=True)
-    titulo = Column(String)
-    contenido_noticia = Column(Text)
-    url_video = Column(String)
-    fecha_proceso = Column(DateTime, default=datetime.utcnow)
-
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
-
-youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
-
-def limpiar_titulo(texto):
-    texto_limpio = re.sub(r'[^\w\s\u00C0-\u00FF.,!¡?¿\-:;"\']', '', texto)
-    return re.sub(r'\s+', ' ', texto_limpio).strip()
-
-def get_latest_videos(channel_id):
-    request = youtube.search().list(part="snippet", channelId=channel_id, maxResults=5, order="date", type="video")
-    response = request.execute()
-    return [{
-        'id': i['id']['videoId'], 
-        'title': i['snippet']['title'],
-        'desc': i['snippet']['description']
-    } for i in response.get('items', [])]
-
-def obtener_contenido(video_id, descripcion):
-    print(f"DEBUG: Procesando {video_id}...")
-    texto_final = ""
-    
-    # INTENTO 1: Subtítulos (Transcript)
+def video_ya_existe(video_id):
+    if not DB_URL:
+        print("❌ Error: DATABASE_URL no está configurada.")
+        return False
     try:
-        # Busca subtítulos en español o inglés (manuales o auto-generados)
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['es', 'es-419', 'en'])
-        texto_final = " ".join([entry['text'] for entry in transcript])
-        print("   ✅ Subtítulos obtenidos.")
-        return texto_final, "TRANSCRIPCION"
-    except Exception:
-        print("   ⚠️ Sin subtítulos o bloqueado.")
-
-    # INTENTO 2: Descripción (Fallback)
-    if descripcion and len(descripcion) > 50:
-        print("   ✅ Usando descripción del video.")
-        return descripcion, "RESUMEN"
-    
-    return None, None
-
-def generate_news(text, title, tipo):
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    if tipo == "TRANSCRIPCION":
-        prompt = f"Eres periodista. Crea noticia HTML (+300 palabras) sobre '{title}' usando esta transcripción: {text[:25000]}"
-    else:
-        prompt = f"Eres periodista. Crea una noticia BREVE basada en esta descripción de video: '{title}'. Info: {text}"
-        
-    try:
-        return model.generate_content(prompt).text
-    except: return None
-
-def main():
-    session = Session()
-    try:
-        if not CHANNEL_ID: return
-        videos = get_latest_videos(CHANNEL_ID)
-        
-        for v in videos:
-            vid = v['id']
-            vtitle = limpiar_titulo(v['title'])
-            
-            if session.query(VideoNoticia).filter_by(id=vid).first():
-                print(f"[YA EXISTE] {vtitle}")
-                continue
-
-            print(f"[NUEVO] {vtitle}")
-            texto, tipo = obtener_contenido(vid, v['desc'])
-            
-            if texto:
-                html = generate_news(texto, vtitle, tipo)
-                if html:
-                    post = VideoNoticia(id=vid, titulo=vtitle, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
-                    session.add(post)
-                    session.commit()
-                    print(f" -- ¡GUARDADO! ({tipo})")
-            else:
-                print(" -- Saltando (Sin datos suficientes)")
-
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM noticias WHERE video_id = %s", (video_id,))
+        exists = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+        return exists
     except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        session.close()
+        print(f"❌ Error DB Check: {e}")
+        return False
+
+def obtener_transcripcion(video_id):
+    for key in SUPADATA_KEYS:
+        print(f"--- Intentando Supadata con token: {key[:6]}... ---")
+        url = f"https://api.supadata.ai/v1/youtube/transcript?videoId={video_id}"
+        headers = {"x-api-key": key}
+        try:
+            res = requests.get(url, headers=headers, timeout=30)
+            if res.status_code == 200:
+                data = res.json()
+                segmentos = data.get('content', [])
+                if isinstance(segmentos, list):
+                    texto_final = " ".join([s.get('text', '') for s in segmentos if 'text' in s])
+                    if texto_final.strip():
+                        print(f"✅ Transcripción procesada ({len(texto_final)} caracteres).")
+                        return texto_final
+            print(f"⚠️ Supadata Status {res.status_code}")
+        except: continue
+    return None
+
+def generar_noticia(texto, titulo):
+    for key in GEMINI_KEYS:
+        print(f"--- Intentando Gemini con token: {key[:6]}... ---")
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            prompt = (
+                f"Actúa como un periodista profesional. Redacta una noticia EXTENSA en HTML.\n"
+                f"TÍTULO: {titulo}\n"
+                f"CONTENIDO BASE: {texto}\n\n"
+                f"REGLAS: Responde ÚNICAMENTE con el código HTML usando <h2>, <h3>, <p> y <strong>. Sin markdown."
+            )
+            response = model.generate_content(prompt)
+            if response and response.text:
+                return response.text.replace('```html', '').replace('```', '').strip()
+        except: continue
+    return None
+
+def run():
+    if not CHANNEL_ID:
+        print("❌ Error: CHANNEL_ID no configurado.")
+        return
+
+    # Limpieza de URL para evitar InvalidSchema
+    canal_limpio = CHANNEL_ID.replace('[', '').replace(']', '').strip()
+    rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={canal_limpio}"
+    
+    print(f"🚀 Conectando a: {rss_url}")
+    
+    try:
+        res_rss = requests.get(rss_url, timeout=15)
+        res_rss.raise_for_status()
+        tree = ET.fromstring(res_rss.content)
+        entry = tree.find('{http://www.w3.org/2005/Atom}entry')
+        
+        if entry is None:
+            print("❌ No se encontraron videos.")
+            return
+
+        v_id = entry.find('{http://www.youtube.com/xml/schemas/2015}videoId').text
+        v_titulo = entry.find('{http://www.w3.org/2005/Atom}title').text
+    except Exception as e:
+        print(f"❌ Error al obtener RSS: {e}")
+        return
+
+    if video_ya_existe(v_id):
+        print(f"🛑 El video '{v_titulo}' ya fue procesado.")
+        return
+
+    print(f"🎬 Procesando: {v_titulo}")
+    texto = obtener_transcripcion(v_id)
+    if not texto: return
+
+    html = generar_noticia(texto, v_titulo)
+    if not html: return
+
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO noticias (video_id, title, content, published_at) VALUES (%s, %s, %s, NOW())",
+            (v_id, v_titulo, html)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✨ TODO OK: Noticia guardada.")
+    except Exception as e:
+        print(f"❌ Error al insertar en Postgres: {e}")
 
 if __name__ == "__main__":
-    main()
+    run()
