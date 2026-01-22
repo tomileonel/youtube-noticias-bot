@@ -1,6 +1,5 @@
-yt-dlp
+requests
 google-generativeai
 sqlalchemy
 psycopg2-binary
 google-api-python-client
-webvtt-py
