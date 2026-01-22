@@ -134,7 +134,7 @@ def generate_news(text, title):
     if not text or len(text) < 100: return None
     
     # Probamos modelos por orden de estabilidad
-    modelos = ['gemini-pro', 'gemini-1.5-flash']
+    modelos = ['gemini-2.5-flash']
     for m in modelos:
         try:
             model = genai.GenerativeModel(m)
