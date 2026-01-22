@@ -1,32 +1,29 @@
 import os
 import re
 import logging
-import time
+import requests
+import json
 import google.generativeai as genai
 from youtube_transcript_api import YouTubeTranscriptApi
 from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
+from bs4 import BeautifulSoup
 
-# Configuración de Logs
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# --- CONFIGURACIÓN Y SECRETOS ---
+# --- CONFIG ---
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-# Ajuste para Heroku/Render/Vercel que usan 'postgres://'
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-if not DATABASE_URL:
-    logging.error("Falta DATABASE_URL")
-    exit()
+if not DATABASE_URL: exit()
 
-# --- BASE DE DATOS ---
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
 
@@ -41,7 +38,6 @@ class VideoNoticia(Base):
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# --- CLIENTES API ---
 youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -51,151 +47,185 @@ def limpiar_titulo(texto):
 
 def get_latest_videos(channel_id):
     try:
-        request = youtube.search().list(part="snippet", channelId=channel_id, maxResults=5, order="date", type="video")
-        response = request.execute()
-        return [{
-            'id': i['id']['videoId'], 
-            'title': i['snippet']['title'],
-            'desc': i['snippet']['description'] # Guardamos descripción para emergencia
-        } for i in response.get('items', [])]
+        req = youtube.search().list(part="snippet", channelId=channel_id, maxResults=5, order="date", type="video")
+        res = req.execute()
+        return [{'id': i['id']['videoId'], 'title': i['snippet']['title']} for i in res.get('items', [])]
     except Exception as e:
-        logging.error(f"Error API Youtube Data: {e}")
+        print(f"Error API Youtube: {e}")
         return []
 
-# --- LÓGICA DE EXTRACCIÓN ROBUSTA (CASCADA) ---
-def obtener_contenido_inteligente(video_id, descripcion_backup):
-    """
-    Intenta obtener la transcripción por todos los medios.
-    Si falla, devuelve la descripción.
-    """
-    print(f"DEBUG: 🕵️ Analizando video {video_id}...")
-    
-    transcript_text = ""
-
-    # METODO 1: COOKIES (El más efectivo para evitar bloqueos)
-    if os.path.exists('cookies.txt'):
-        print("   🍪 Intentando con cookies.txt...")
+# --- NIVEL 1: API OFICIAL (Puede fallar en Cloud) ---
+def get_transcript_official(video_id):
+    print("   🔹 Intento 1: API Oficial...")
+    try:
+        # Si subiste cookies.txt, úsalo. Si no, intenta directo.
+        cookies = 'cookies.txt' if os.path.exists('cookies.txt') else None
+        
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookies)
+        
+        # Buscar español o inglés (o autogenerado traducido)
         try:
-            transcript = YouTubeTranscriptApi.get_transcript(
-                video_id, 
-                languages=['es', 'es-419', 'en'], 
-                cookies='cookies.txt'
-            )
-            transcript_text = " ".join([entry['text'] for entry in transcript])
-            print("   ✅ ÉXITO: Transcripción obtenida con Cookies.")
-            return transcript_text, "FULL"
-        except Exception as e:
-            print(f"   ⚠️ Fallo con cookies: {e}")
-    else:
-        print("   ℹ️ No se encontró cookies.txt (Saltando Método 1)")
-
-    # METODO 2: DIRECTO (Sin cookies, modo invitado)
-    print("   🌐 Intentando modo directo (Guest)...")
-    try:
-        transcript = YouTubeTranscriptApi.get_transcript(
-            video_id, 
-            languages=['es', 'es-419', 'en']
-        )
-        transcript_text = " ".join([entry['text'] for entry in transcript])
-        print("   ✅ ÉXITO: Transcripción obtenida directa.")
-        return transcript_text, "FULL"
+            transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
+        except:
+            transcript = transcript_list.find_generated_transcript(['en', 'es']).translate('es')
+            
+        text_data = transcript.fetch()
+        full_text = " ".join([t['text'] for t in text_data])
+        return full_text
     except Exception as e:
-        print(f"   ⚠️ Fallo directo: {e}")
-
-    # METODO 3: ULTIMO RECURSO (Descripción)
-    print("   🛡️ Activando protocolo de emergencia: Usando Descripción.")
-    if descripcion_backup and len(descripcion_backup) > 50:
-        return descripcion_backup, "RESUMEN"
-    
-    print("   ❌ FALLO TOTAL: No hay transcripción ni descripción válida.")
-    return None, None
-
-# --- GENERACIÓN DE NOTICIA ---
-def generate_news(text, title, modo):
-    if not text: return None
-    
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    
-    if modo == "FULL":
-        prompt = f"""
-        Actúa como un periodista experto en tecnología.
-        Escribe una noticia completa en formato HTML para WordPress basada en la siguiente transcripción de video.
-        
-        TITULO: {title}
-        TRANSCRIPCIÓN: {text[:25000]}
-        
-        REGLAS:
-        1. Usa etiquetas HTML: <h2> para subtítulos, <p> para párrafos, <ul> para listas.
-        2. Tono: Profesional, informativo y objetivo.
-        3. Longitud: Mínimo 350 palabras.
-        4. No inventes datos que no estén en el texto.
-        """
-    else: # Modo RESUMEN
-        prompt = f"""
-        Actúa como un periodista. Tenemos información limitada de este video.
-        Escribe una noticia BREVE en HTML basada en la descripción disponible.
-        
-        TITULO: {title}
-        DESCRIPCIÓN DEL VIDEO: {text}
-        
-        REGLAS:
-        1. Infiere el contexto del video.
-        2. Aclara que "El video trata sobre..." o "Se discute...".
-        3. Usa HTML simple (<h2>, <p>).
-        4. Sé conciso pero profesional.
-        """
-
-    try:
-        return model.generate_content(prompt).text
-    except Exception as e:
-        logging.error(f"Error Gemini: {e}")
+        print(f"      Fallo API Oficial: {e}")
         return None
 
-# --- BUCLE PRINCIPAL ---
+# --- NIVEL 2: RED INVIDIOUS (Espejos) ---
+def get_transcript_invidious(video_id):
+    print("   🔹 Intento 2: Red Invidious (Espejos)...")
+    instances = [
+        "https://inv.tux.pizza",
+        "https://invidious.jing.rocks",
+        "https://vid.uff.ink",
+        "https://yt.artemislena.eu",
+        "https://invidious.projectsegfau.lt"
+    ]
+    
+    for base_url in instances:
+        try:
+            # 1. Obtener metadatos del video
+            url = f"{base_url}/api/v1/videos/{video_id}"
+            res = requests.get(url, timeout=5)
+            if res.status_code != 200: continue
+            
+            data = res.json()
+            captions = data.get('captions', [])
+            
+            # 2. Buscar subtítulo en español
+            selected_caption = None
+            for cap in captions:
+                if 'es' in cap['label'].lower() or 'spanish' in cap['label'].lower() or cap['lang'] == 'es':
+                    selected_caption = cap
+                    break
+            
+            # Si no hay español, probar inglés
+            if not selected_caption and captions:
+                selected_caption = captions[0]
+
+            if selected_caption:
+                # 3. Descargar el texto (suele venir en formato VTT)
+                cap_url = f"{base_url}{selected_caption['url']}"
+                cap_res = requests.get(cap_url)
+                
+                # Limpiar el formato VTT para dejar solo texto
+                raw_text = cap_res.text
+                clean_text = clean_vtt(raw_text)
+                if len(clean_text) > 50:
+                    print(f"      ✅ Éxito en {base_url}")
+                    return clean_text
+
+        except Exception:
+            continue
+            
+    return None
+
+def clean_vtt(vtt_content):
+    # Elimina tiempos y cabeceras del formato WebVTT
+    lines = vtt_content.splitlines()
+    text_lines = []
+    for line in lines:
+        if '-->' in line or line.strip() == 'WEBVTT' or not line.strip():
+            continue
+        # Eliminar etiquetas HTML como <c.colorE5E5E5>
+        clean_line = re.sub(r'<[^>]+>', '', line)
+        text_lines.append(clean_line)
+    return " ".join(dict.fromkeys(text_lines)) # Elimina duplicados seguidos y une
+
+# --- NIVEL 3: RED PIPED (Otra alternativa) ---
+def get_transcript_piped(video_id):
+    print("   🔹 Intento 3: Red Piped...")
+    api_url = f"https://pipedapi.kavin.rocks/streams/{video_id}"
+    try:
+        res = requests.get(api_url, timeout=10)
+        data = res.json()
+        subtitles = data.get('subtitles', [])
+        
+        tgt_sub = None
+        for sub in subtitles:
+            if sub['code'] == 'es':
+                tgt_sub = sub
+                break
+        
+        if not tgt_sub and subtitles: tgt_sub = subtitles[0] # Fallback cualquiera
+
+        if tgt_sub:
+            # Piped devuelve formato XML/VTT a veces, tratamos de limpiarlo
+            sub_res = requests.get(tgt_sub['url'])
+            # Usamos BeautifulSoup para extraer solo texto si es XML
+            soup = BeautifulSoup(sub_res.text, "html.parser")
+            return soup.get_text().replace('\n', ' ')
+            
+    except Exception as e:
+        print(f"      Fallo Piped: {e}")
+        return None
+    return None
+
+# --- CONTROLADOR PRINCIPAL ---
+def obtener_transcripcion_blindada(video_id):
+    # Secuencia de intentos
+    texto = get_transcript_official(video_id)
+    if texto: return texto
+    
+    texto = get_transcript_invidious(video_id)
+    if texto: return texto
+    
+    texto = get_transcript_piped(video_id)
+    if texto: return texto
+    
+    return None
+
+def generate_news(text, title):
+    # Usamos modelo Pro o Flash según disponibilidad
+    modelos = ['gemini-1.5-flash', 'gemini-pro']
+    for m in modelos:
+        try:
+            model = genai.GenerativeModel(m)
+            prompt = f"Eres periodista. Escribe noticia HTML (+300 palabras) sobre '{title}'. TRANSCRIPCION: {text[:25000]}"
+            return model.generate_content(prompt).text
+        except: continue
+    return None
+
 def main():
     session = Session()
     try:
-        cid = CHANNEL_ID
-        if not cid: return
-
-        logging.info("--- INICIANDO CICLO DE BOT ---")
-        videos = get_latest_videos(cid)
-        logging.info(f"Encontrados {len(videos)} videos recientes.")
-
+        if not CHANNEL_ID: return
+        print("--- INICIANDO BÚSQUEDA ---")
+        videos = get_latest_videos(CHANNEL_ID)
+        
         for v in videos:
             vid = v['id']
             vtitle = limpiar_titulo(v['title'])
-            vdesc = v['desc']
-
-            # Verificar si ya existe en BD
+            
             if session.query(VideoNoticia).filter_by(id=vid).first():
-                logging.info(f"⏭️  [SALTADO] Ya existe: {vtitle}")
+                print(f"⏭️  {vtitle}")
                 continue
 
-            logging.info(f"✨ [NUEVO] Procesando: {vtitle}")
+            print(f"✨ Procesando: {vtitle}")
             
-            # Obtener contenido (Cascada: Cookies -> Directo -> Descripción)
-            texto_contenido, modo = obtener_contenido_inteligente(vid, vdesc)
+            # AQUÍ OBTENEMOS LA TRANSCRIPCIÓN SÍ O SÍ
+            transcript = obtener_transcripcion_blindada(vid)
             
-            if texto_contenido:
-                html = generate_news(texto_contenido, vtitle, modo)
+            if transcript:
+                print(f"   📜 Transcripción conseguida ({len(transcript)} caracteres)")
+                html = generate_news(transcript, vtitle)
                 if html:
-                    post = VideoNoticia(
-                        id=vid, 
-                        titulo=vtitle, 
-                        contenido_noticia=html, 
-                        url_video=f"https://youtu.be/{vid}"
-                    )
+                    post = VideoNoticia(id=vid, titulo=vtitle, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
                     session.add(post)
                     session.commit()
-                    logging.info(f"✅ [GUARDADO] Noticia generada ({modo})")
+                    print("   ✅ GUARDADO")
                 else:
-                    logging.error("Error generando HTML con Gemini")
+                    print("   ❌ Error en generación IA")
             else:
-                logging.warning("No se pudo obtener contenido suficiente para la noticia.")
+                print("   ❌ IMPOSIBLE OBTENER TRANSCRIPCIÓN (Se omitirá el video)")
 
     except Exception as e:
-        logging.error(f"Error General: {e}")
+        print(f"Error General: {e}")
     finally:
         session.close()
 

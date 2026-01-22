@@ -1,5 +1,7 @@
-youtube-transcript-api
+youtube-transcript-api>=0.6.0
 google-generativeai
 sqlalchemy
 psycopg2-binary
 google-api-python-client
+requests
+beautifulsoup4
