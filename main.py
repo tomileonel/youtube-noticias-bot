@@ -2,27 +2,37 @@ import os
 import re
 import logging
 import requests
+import json
 import google.generativeai as genai
 from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+# Configuración de Logs más detallada
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- CONFIGURACIÓN ---
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
-# Obtenemos la cadena de tokens y la convertimos en lista
+
+# Procesamiento de tokens Supadata (separados por coma)
 SUPADATA_KEYS_RAW = os.getenv('SUPADATA_API_KEY', '')
 SUPADATA_KEYS = [k.strip() for k in SUPADATA_KEYS_RAW.split(',') if k.strip()]
 
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-if not DATABASE_URL: exit()
+if not DATABASE_URL: 
+    logging.error("Falta DATABASE_URL")
+    exit()
+
+if not SUPADATA_KEYS:
+    logging.error("❌ CRÍTICO: No se encontraron tokens en SUPADATA_API_KEY.")
+    logging.error("Asegúrate de separar los tokens por comas en los Secretos de GitHub.")
+    exit()
 
 engine = create_engine(DATABASE_URL)
 Base = declarative_base()
@@ -51,46 +61,79 @@ def get_latest_videos(channel_id):
         res = req.execute()
         return [{'id': i['id']['videoId'], 'title': i['snippet']['title']} for i in res.get('items', [])]
     except Exception as e:
-        print(f"Error API Youtube: {e}")
+        logging.error(f"Error API Youtube: {e}")
         return []
 
-# --- LÓGICA SUPADATA CON ROTACIÓN ---
+# --- LÓGICA SUPADATA CORREGIDA ---
 def get_transcript_supadata(video_id):
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
     print(f"   🔹 Solicitando a Supadata ({len(SUPADATA_KEYS)} tokens disponibles)...")
     
-    url = f"https://api.supadata.ai/v1/youtube/transcript?videoId={video_id}&text=true"
-
+    # Endpoint actualizado: Usamos 'transcript' genérico con URL y forzamos español
+    api_url = "https://api.supadata.ai/v1/transcript"
+    
     for index, api_key in enumerate(SUPADATA_KEYS):
+        # Enmascaramos el token para el log
+        token_mask = api_key[:4] + "..." + api_key[-4:]
+        print(f"      🔑 Probando Token #{index + 1} ({token_mask})")
+        
+        headers = {'x-api-key': api_key}
+        # Parametros clave: URL completa, lang=es, text=true
+        params = {
+            'url': video_url,
+            'lang': 'es',
+            'text': 'true'
+        }
+
         try:
-            print(f"      🔑 Probando token #{index + 1}...")
+            response = requests.get(api_url, headers=headers, params=params, timeout=30)
             
-            headers = {'x-api-key': api_key}
-            response = requests.get(url, headers=headers, timeout=20)
-            
+            # --- DIAGNÓSTICO DE RESPUESTA ---
             if response.status_code == 200:
-                data = response.json()
-                # Supadata suele devolver un campo 'content' con el texto
-                text = data.get('content')
+                # Intentamos parsear JSON primero
+                try:
+                    data = response.json()
+                    # A veces devuelve {'content': 'texto...'} o {'results': ...}
+                    if isinstance(data, dict):
+                        text = data.get('content') or data.get('text') or data.get('transcript')
+                    else:
+                        text = None # Formato desconocido
+                        
+                    if text:
+                        print(f"      ✅ ÉXITO (JSON válido) con Token #{index + 1}")
+                        return text
+                except json.JSONDecodeError:
+                    # Si falla el JSON, es probable que haya devuelto TEXTO PLANO directamente
+                    if response.text and len(response.text) > 50:
+                        print(f"      ✅ ÉXITO (Texto Plano) con Token #{index + 1}")
+                        return response.text
                 
-                if text:
-                    print(f"      ✅ Éxito con token #{index + 1}")
-                    return text
-                else:
-                    print("      ⚠️ Respuesta vacía de Supadata.")
-            elif response.status_code in [402, 403, 429]:
-                print(f"      ⚠️ Token #{index + 1} agotado o inválido (Code {response.status_code}). Rotando...")
-                continue # Pasa al siguiente token del bucle
+                print("      ⚠️ Respuesta 200 OK pero sin contenido reconocible.")
+                print(f"      DEBUG RAW: {response.text[:200]}...") # Imprime el inicio para ver qué devolvió
+
+            elif response.status_code in [401, 403]:
+                print(f"      ⛔ Token inválido o sin permisos (Error {response.status_code}). Rotando...")
+            elif response.status_code == 402:
+                print(f"      💲 Token sin saldo (Error {response.status_code}). Rotando...")
+            elif response.status_code == 429:
+                print(f"      ⏳ Rate Limit excedido (Error {response.status_code}). Rotando...")
+            elif response.status_code == 500:
+                print(f"      🔥 Error Interno de Supadata (500). El video podría no tener subtítulos.")
+                # Si es error 500, a veces es culpa del video, no del token. Pero seguimos probando.
             else:
-                print(f"      ❌ Error desconocido Supadata: {response.status_code}")
-                
+                print(f"      ❌ Error desconocido: {response.status_code} - {response.text}")
+
         except Exception as e:
             print(f"      ❌ Error de conexión: {e}")
             continue
 
-    print("   ❌ FALLO TOTAL: Se probaron todos los tokens y ninguno funcionó.")
+    print("   ❌ FALLO TOTAL: Ningún token pudo obtener la transcripción.")
     return None
 
 def generate_news(text, title):
+    if not text or len(text) < 100: return None
+    
+    # Probamos modelos por orden de estabilidad
     modelos = ['gemini-pro', 'gemini-1.5-flash']
     for m in modelos:
         try:
@@ -104,7 +147,7 @@ def main():
     session = Session()
     try:
         if not CHANNEL_ID: return
-        print("--- INICIANDO CON SUPADATA ---")
+        print("--- INICIANDO DIAGNÓSTICO SUPADATA ---")
         videos = get_latest_videos(CHANNEL_ID)
         
         for v in videos:
@@ -116,22 +159,20 @@ def main():
                 continue
 
             print(f"✨ Procesando: {vtitle}")
-            
-            # Llamada a Supadata
             transcript = get_transcript_supadata(vid)
             
             if transcript:
-                print(f"   📜 Transcripción OK.")
+                print(f"   📜 Transcripción OK ({len(transcript)} caracteres).")
                 html = generate_news(transcript, vtitle)
                 if html:
                     post = VideoNoticia(id=vid, titulo=vtitle, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
                     session.add(post)
                     session.commit()
-                    print("   ✅ GUARDADO")
+                    print("   ✅ GUARDADO EN BD")
                 else:
-                    print("   ❌ Error Gemini")
+                    print("   ❌ Error Gemini generando texto")
             else:
-                print("   ❌ OMITIDO (Sin transcripción)")
+                print("   ❌ VIDEO OMITIDO (Fallo en transcripción)")
 
     except Exception as e:
         print(f"Error General: {e}")
