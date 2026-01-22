@@ -1,6 +1,6 @@
-youtube-transcript-api>=0.6.2
+yt-dlp
 google-generativeai
 sqlalchemy
 psycopg2-binary
 google-api-python-client
-requests
+webvtt-py

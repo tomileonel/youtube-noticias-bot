@@ -1,10 +1,10 @@
 import os
 import re
 import logging
-import requests
+import glob
+import webvtt
 import google.generativeai as genai
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig # <--- LO QUE PEDÍA LA DOCU
+from yt_dlp import YoutubeDL
 from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -53,101 +53,64 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- HERRAMIENTAS DE PROXY ---
-def obtener_proxies_gratis():
-    print("      🛡️ Buscando proxies gratuitos...")
-    try:
-        # Obtenemos una lista de proxies HTTP/HTTPS frescos
-        url = "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all"
-        r = requests.get(url, timeout=10)
-        proxies = r.text.strip().split('\n')
-        # Filtramos vacíos y devolvemos los primeros 20
-        return [p.strip() for p in proxies if p.strip()][:20]
-    except:
-        return []
-
-def probar_fetch_con_api(api_obj, video_id):
-    """Lógica común para buscar subtítulos con una instancia ya configurada"""
-    try:
-        transcript_list = api_obj.list(video_id)
-        
-        # Prioridad: Español -> Inglés
-        transcript = None
-        try:
-            transcript = transcript_list.find_transcript(['es', 'es-419'])
-        except:
-            try:
-                transcript = transcript_list.find_transcript(['en'])
-            except:
-                try:
-                    transcript = transcript_list.find_generated_transcript(['es', 'en'])
-                except:
-                    pass
-        
-        if not transcript:
-            for t in transcript_list:
-                transcript = t
-                break
-        
-        if transcript:
-            if transcript.language_code not in ['es', 'es-419'] and transcript.is_translatable:
-                transcript = transcript.translate('es')
-            
-            data = transcript.fetch()
-            return " ".join([t['text'] for t in data])
-            
-    except Exception as e:
-        # No imprimimos error aquí para no ensuciar el log en cada intento de proxy
-        return None
-    return None
-
-# --- LA SOLUCIÓN BLINDADA ---
-def obtener_transcripcion_inteligente(video_id):
-    print(f"   🔹 Iniciando protocolo para {video_id}...")
-
-    # NIVEL 1: Disfraz de User-Agent (Sin Proxy)
-    # Según docu: "Overwriting request defaults"
-    print("      Intento 1: Spoofing de Headers (User-Agent)...")
-    try:
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "es-ES,es;q=0.9"
-        })
-        
-        # Inyectamos la sesión como dice la documentación
-        ytt_api = YouTubeTranscriptApi(http_client=session)
-        texto = probar_fetch_con_api(ytt_api, video_id)
-        if texto: return texto
-    except Exception as e:
-        print(f"      Fallo Nivel 1: {e}")
-
-    # NIVEL 2: Proxies Rotativos con GenericProxyConfig
-    # Según docu: "Using other Proxy solutions"
-    print("      Intento 2: Rotación de Proxies (GenericProxyConfig)...")
-    proxies = obtener_proxies_gratis()
+# --- EL NUEVO MÉTODO CON YT-DLP ---
+def obtener_subtitulos_ytdlp(video_id):
+    print(f"   🔹 Ejecutando yt-dlp para {video_id}...")
     
-    for i, proxy_url in enumerate(proxies):
-        print(f"      Testing Proxy {i+1}/{len(proxies)}: {proxy_url}")
-        try:
-            # Configuración exacta de la documentación
-            proxy_conf = GenericProxyConfig(
-                http_url=f"http://{proxy_url}",
-                https_url=f"http://{proxy_url}"
-            )
-            
-            # Instanciamos con el proxy
-            ytt_api_proxy = YouTubeTranscriptApi(proxy_config=proxy_conf)
-            
-            texto = probar_fetch_con_api(ytt_api_proxy, video_id)
-            if texto:
-                print("      ✅ ¡ÉXITO CON PROXY!")
-                return texto
-        except Exception:
-            continue # Si falla el proxy, probamos el siguiente
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    output_base = f"subs_{video_id}"
+    
+    # Configuración "Anti-Bloqueo"
+    ydl_opts = {
+        'skip_download': True,      # ¡NO bajar video! Solo info
+        'writeautomaticsub': True,  # Bajar subs auto-generados
+        'writesubtitles': True,     # Bajar subs manuales si hay
+        'sublangs': ['es', 'en'],   # Preferir español, luego inglés
+        'outtmpl': output_base,     # Nombre del archivo
+        'quiet': True,
+        'no_warnings': True,
+        
+        # EL TRUCO MAESTRO: Simular ser una App de Android
+        # Esto salta la mayoría de bloqueos de "Sign in required"
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios'] 
+            }
+        }
+    }
 
-    print("   ❌ IMPOSIBLE: Fallaron todos los métodos.")
-    return None
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+            
+        # yt-dlp guarda como 'subs_ID.es.vtt' o 'subs_ID.en.vtt'
+        # Buscamos cualquier .vtt que haya generado
+        archivos_vtt = glob.glob(f"{output_base}*.vtt")
+        
+        if not archivos_vtt:
+            print("      ❌ yt-dlp no encontró subtítulos.")
+            return None
+            
+        # Tomamos el primero que encuentre (idealmente será español por la prioridad)
+        archivo_elegido = archivos_vtt[0]
+        print(f"      ✅ Subtítulo descargado: {archivo_elegido}")
+        
+        # Extraer texto limpio del VTT
+        texto_limpio = []
+        for caption in webvtt.read(archivo_elegido):
+            texto_limpio.append(caption.text)
+            
+        full_text = " ".join(texto_limpio).replace('\n', ' ')
+        
+        # Limpieza de archivos temporales
+        for f in archivos_vtt:
+            if os.path.exists(f): os.remove(f)
+            
+        return full_text
+
+    except Exception as e:
+        print(f"      ❌ Error crítico yt-dlp: {e}")
+        return None
 
 def generate_news(text, title):
     modelos = ['gemini-pro', 'gemini-1.5-flash']
@@ -175,20 +138,22 @@ def main():
                 continue
 
             print(f"✨ Procesando: {vtitle}")
-            transcript = obtener_transcripcion_inteligente(vid)
+            
+            # Usamos yt-dlp directamente
+            transcript = obtener_subtitulos_ytdlp(vid)
             
             if transcript:
-                print(f"   📜 Transcripción OK.")
+                print(f"   📜 Texto extraído ({len(transcript)} caracteres).")
                 html = generate_news(transcript, vtitle)
                 if html:
                     post = VideoNoticia(id=vid, titulo=vtitle, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
                     session.add(post)
                     session.commit()
-                    print("   ✅ GUARDADO")
+                    print("   ✅ GUARDADO EN BD")
                 else:
-                    print("   ❌ Error Gemini")
+                    print("   ❌ Error generando noticia (Gemini)")
             else:
-                print("   ❌ SKIPPING (Bloqueo IP)")
+                print("   ❌ FALLO TOTAL: No se pudo obtener texto.")
 
     except Exception as e:
         print(f"Error General: {e}")
