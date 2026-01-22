@@ -1,24 +1,32 @@
-name: Bot_Noticias_Manual
+name: Bot de Noticias Youtube
 
 on:
-  workflow_dispatch: # ESTO HABILITA EL BOTÓN MANUAL Y QUITA EL AUTOMÁTICO
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
-  build:
+  run-script:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Install
-        run: pip install requests psycopg2-binary google-generativeai python-dotenv
-      - name: Run
+          cache: 'pip'
+
+      # --- PASO IMPORTANTE: INSTALAR LAS LIBRERÍAS ---
+      - name: Instalar Dependencias
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      # --- PASO FINAL: CORRER EL BOT ---
+      - name: Correr Bot
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          SUPADATA_KEYS: ${{ secrets.SUPADATA_KEYS }}
-          GEMINI_KEYS: ${{ secrets.GEMINI_KEYS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python main.py
