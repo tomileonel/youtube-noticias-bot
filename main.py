@@ -4,11 +4,11 @@ import logging
 import requests
 import google.generativeai as genai
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig # <--- LO QUE PEDÍA LA DOCU
 from googleapiclient.discovery import build
 from sqlalchemy import create_engine, Column, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
-from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -53,133 +53,117 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- NIVEL 1: API OFICIAL (Sintaxis basada en Instancia) ---
-def get_transcript_official(video_id):
-    print("   🔹 Intento 1: API Oficial (Sintaxis Instancia)...")
+# --- HERRAMIENTAS DE PROXY ---
+def obtener_proxies_gratis():
+    print("      🛡️ Buscando proxies gratuitos...")
     try:
-        # 1. Instanciar la clase (Como pide tu documentación)
-        ytt_api = YouTubeTranscriptApi()
+        # Obtenemos una lista de proxies HTTP/HTTPS frescos
+        url = "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all"
+        r = requests.get(url, timeout=10)
+        proxies = r.text.strip().split('\n')
+        # Filtramos vacíos y devolvemos los primeros 20
+        return [p.strip() for p in proxies if p.strip()][:20]
+    except:
+        return []
+
+def probar_fetch_con_api(api_obj, video_id):
+    """Lógica común para buscar subtítulos con una instancia ya configurada"""
+    try:
+        transcript_list = api_obj.list(video_id)
         
-        # 2. Obtener la lista de transcripciones disponibles usando .list()
-        transcript_list = ytt_api.list(video_id)
-        
+        # Prioridad: Español -> Inglés
         transcript = None
-        
-        # 3. Buscar manual o generado en Español o Inglés
-        # Intentamos buscar español directamente
         try:
             transcript = transcript_list.find_transcript(['es', 'es-419'])
-            print("      ✅ Encontrado subtítulo nativo en Español.")
         except:
-            # Si falla, buscamos inglés
             try:
                 transcript = transcript_list.find_transcript(['en'])
-                print("      ⚠️ Encontrado inglés, se traducirá...")
             except:
-                # Si falla, buscamos cualquiera generado automáticamente
                 try:
                     transcript = transcript_list.find_generated_transcript(['es', 'en'])
                 except:
-                    print("      ⚠️ No se encontró nativo/generado específico.")
+                    pass
         
         if not transcript:
-            # Último intento: agarrar el primero que haya y traducirlo
-            try:
-                for t in transcript_list:
-                    transcript = t
-                    break
-            except:
-                return None
-
-        # 4. Si no es español, traducir
-        if transcript and transcript.language_code not in ['es', 'es-419']:
-            try:
-                if transcript.is_translatable:
-                    transcript = transcript.translate('es')
-                    print("      ✅ Traducido a Español.")
-            except Exception as e:
-                print(f"      ⚠️ No se pudo traducir: {e}")
-
-        # 5. Descargar ("fetch")
-        text_data = transcript.fetch()
-        full_text = " ".join([t['text'] for t in text_data])
-        return full_text
-
+            for t in transcript_list:
+                transcript = t
+                break
+        
+        if transcript:
+            if transcript.language_code not in ['es', 'es-419'] and transcript.is_translatable:
+                transcript = transcript.translate('es')
+            
+            data = transcript.fetch()
+            return " ".join([t['text'] for t in data])
+            
     except Exception as e:
-        print(f"      ❌ Fallo API Oficial: {e}")
+        # No imprimimos error aquí para no ensuciar el log en cada intento de proxy
         return None
-
-# --- NIVEL 2: RED INVIDIOUS (Respaldo) ---
-def get_transcript_invidious(video_id):
-    print("   🔹 Intento 2: Red Invidious (Espejos)...")
-    instances = [
-        "https://inv.tux.pizza",
-        "https://invidious.jing.rocks",
-        "https://vid.uff.ink",
-        "https://yt.artemislena.eu"
-    ]
-    
-    for base_url in instances:
-        try:
-            url = f"{base_url}/api/v1/videos/{video_id}"
-            res = requests.get(url, timeout=5)
-            if res.status_code != 200: continue
-            
-            data = res.json()
-            captions = data.get('captions', [])
-            
-            selected = None
-            for cap in captions:
-                if 'es' in cap['label'].lower():
-                    selected = cap
-                    break
-            
-            if not selected and captions: selected = captions[0]
-
-            if selected:
-                cap_res = requests.get(f"{base_url}{selected['url']}")
-                return clean_vtt(cap_res.text)
-        except: continue
     return None
 
-def clean_vtt(vtt_content):
-    lines = vtt_content.splitlines()
-    text = []
-    for line in lines:
-        if '-->' not in line and 'WEBVTT' not in line and line.strip():
-            text.append(re.sub(r'<[^>]+>', '', line))
-    return " ".join(dict.fromkeys(text))
+# --- LA SOLUCIÓN BLINDADA ---
+def obtener_transcripcion_inteligente(video_id):
+    print(f"   🔹 Iniciando protocolo para {video_id}...")
 
-# --- CONTROLADOR ---
-def obtener_transcripcion_blindada(video_id):
-    texto = get_transcript_official(video_id)
-    if texto: return texto
+    # NIVEL 1: Disfraz de User-Agent (Sin Proxy)
+    # Según docu: "Overwriting request defaults"
+    print("      Intento 1: Spoofing de Headers (User-Agent)...")
+    try:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "es-ES,es;q=0.9"
+        })
+        
+        # Inyectamos la sesión como dice la documentación
+        ytt_api = YouTubeTranscriptApi(http_client=session)
+        texto = probar_fetch_con_api(ytt_api, video_id)
+        if texto: return texto
+    except Exception as e:
+        print(f"      Fallo Nivel 1: {e}")
+
+    # NIVEL 2: Proxies Rotativos con GenericProxyConfig
+    # Según docu: "Using other Proxy solutions"
+    print("      Intento 2: Rotación de Proxies (GenericProxyConfig)...")
+    proxies = obtener_proxies_gratis()
     
-    texto = get_transcript_invidious(video_id)
-    if texto: return texto
-    
+    for i, proxy_url in enumerate(proxies):
+        print(f"      Testing Proxy {i+1}/{len(proxies)}: {proxy_url}")
+        try:
+            # Configuración exacta de la documentación
+            proxy_conf = GenericProxyConfig(
+                http_url=f"http://{proxy_url}",
+                https_url=f"http://{proxy_url}"
+            )
+            
+            # Instanciamos con el proxy
+            ytt_api_proxy = YouTubeTranscriptApi(proxy_config=proxy_conf)
+            
+            texto = probar_fetch_con_api(ytt_api_proxy, video_id)
+            if texto:
+                print("      ✅ ¡ÉXITO CON PROXY!")
+                return texto
+        except Exception:
+            continue # Si falla el proxy, probamos el siguiente
+
+    print("   ❌ IMPOSIBLE: Fallaron todos los métodos.")
     return None
 
 def generate_news(text, title):
-    # Usamos gemini-pro que es más estable en versiones viejas de la lib
     modelos = ['gemini-pro', 'gemini-1.5-flash']
-    
     for m in modelos:
         try:
             model = genai.GenerativeModel(m)
             prompt = f"Eres periodista. Escribe noticia HTML (+300 palabras) sobre '{title}'. TRANSCRIPCION: {text[:25000]}"
-            response = model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            print(f"   ⚠️ Error modelo {m}: {e}")
-            continue
+            return model.generate_content(prompt).text
+        except: continue
     return None
 
 def main():
     session = Session()
     try:
         if not CHANNEL_ID: return
-        print("--- INICIANDO BÚSQUEDA ---")
+        print("--- INICIANDO ---")
         videos = get_latest_videos(CHANNEL_ID)
         
         for v in videos:
@@ -191,7 +175,7 @@ def main():
                 continue
 
             print(f"✨ Procesando: {vtitle}")
-            transcript = obtener_transcripcion_blindada(vid)
+            transcript = obtener_transcripcion_inteligente(vid)
             
             if transcript:
                 print(f"   📜 Transcripción OK.")
@@ -204,7 +188,7 @@ def main():
                 else:
                     print("   ❌ Error Gemini")
             else:
-                print("   ❌ IMPOSIBLE OBTENER TRANSCRIPCIÓN")
+                print("   ❌ SKIPPING (Bloqueo IP)")
 
     except Exception as e:
         print(f"Error General: {e}")
