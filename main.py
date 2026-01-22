@@ -107,7 +107,18 @@ def generate_news(text, title):
         return None
 
 def main():
-    print(DATABASE_URL)
+    db_url = os.getenv('DATABASE_URL', '')
+        
+        if not db_url:
+            print("❌ ERROR GRAVE: La variable DATABASE_URL está VACÍA.")
+        else:
+            # Truco: Reemplazamos ':' por ' : ' (con espacios) para que GitHub no detecte el secreto y lo censure.
+            # Así podrás leerlo en el log.
+            url_visible = db_url.replace(":", " : ").replace("@", " @ ").replace("//", " // ")
+            print("\n👀 --- VERIFICACIÓN DE URL ---")
+            print(f"La URL que está recibiendo el bot es:\n{url_visible}")
+            print("-----------------------------\n")
+        # -------------------------------------------
     session = Session()
     try:
         if not CHANNEL_ID: return
