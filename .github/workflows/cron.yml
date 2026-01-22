@@ -2,8 +2,8 @@ name: Bot de Noticias Youtube
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *'  # Se ejecuta cada 30 minutos
+  workflow_dispatch:        # Botón manual
 
 jobs:
   run-script:
@@ -16,17 +16,18 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
-      # --- PASO IMPORTANTE: INSTALAR LAS LIBRERÍAS ---
       - name: Instalar Dependencias
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
           
-      # --- PASO FINAL: CORRER EL BOT ---
       - name: Correr Bot
         env:
+          # Aquí se pasan las llaves de la caja fuerte al código
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # 👇 ¡ESTA ES LA LÍNEA QUE FALTABA! 👇
+          SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
         run: python main.py
