@@ -2,7 +2,6 @@ import os
 import re
 import logging
 import requests
-import json
 import google.generativeai as genai
 from youtube_transcript_api import YouTubeTranscriptApi
 from googleapiclient.discovery import build
@@ -13,7 +12,7 @@ from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# --- CONFIG ---
+# --- CONFIGURACIÓN ---
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -54,42 +53,74 @@ def get_latest_videos(channel_id):
         print(f"Error API Youtube: {e}")
         return []
 
-# --- NIVEL 1: API OFICIAL (Puede fallar en Cloud) ---
+# --- NIVEL 1: API OFICIAL (Sintaxis basada en Instancia) ---
 def get_transcript_official(video_id):
-    print("   🔹 Intento 1: API Oficial...")
+    print("   🔹 Intento 1: API Oficial (Sintaxis Instancia)...")
     try:
-        # Si subiste cookies.txt, úsalo. Si no, intenta directo.
-        cookies = 'cookies.txt' if os.path.exists('cookies.txt') else None
+        # 1. Instanciar la clase (Como pide tu documentación)
+        ytt_api = YouTubeTranscriptApi()
         
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookies)
+        # 2. Obtener la lista de transcripciones disponibles usando .list()
+        transcript_list = ytt_api.list(video_id)
         
-        # Buscar español o inglés (o autogenerado traducido)
+        transcript = None
+        
+        # 3. Buscar manual o generado en Español o Inglés
+        # Intentamos buscar español directamente
         try:
-            transcript = transcript_list.find_transcript(['es', 'es-419', 'en'])
+            transcript = transcript_list.find_transcript(['es', 'es-419'])
+            print("      ✅ Encontrado subtítulo nativo en Español.")
         except:
-            transcript = transcript_list.find_generated_transcript(['en', 'es']).translate('es')
-            
+            # Si falla, buscamos inglés
+            try:
+                transcript = transcript_list.find_transcript(['en'])
+                print("      ⚠️ Encontrado inglés, se traducirá...")
+            except:
+                # Si falla, buscamos cualquiera generado automáticamente
+                try:
+                    transcript = transcript_list.find_generated_transcript(['es', 'en'])
+                except:
+                    print("      ⚠️ No se encontró nativo/generado específico.")
+        
+        if not transcript:
+            # Último intento: agarrar el primero que haya y traducirlo
+            try:
+                for t in transcript_list:
+                    transcript = t
+                    break
+            except:
+                return None
+
+        # 4. Si no es español, traducir
+        if transcript and transcript.language_code not in ['es', 'es-419']:
+            try:
+                if transcript.is_translatable:
+                    transcript = transcript.translate('es')
+                    print("      ✅ Traducido a Español.")
+            except Exception as e:
+                print(f"      ⚠️ No se pudo traducir: {e}")
+
+        # 5. Descargar ("fetch")
         text_data = transcript.fetch()
         full_text = " ".join([t['text'] for t in text_data])
         return full_text
+
     except Exception as e:
-        print(f"      Fallo API Oficial: {e}")
+        print(f"      ❌ Fallo API Oficial: {e}")
         return None
 
-# --- NIVEL 2: RED INVIDIOUS (Espejos) ---
+# --- NIVEL 2: RED INVIDIOUS (Respaldo) ---
 def get_transcript_invidious(video_id):
     print("   🔹 Intento 2: Red Invidious (Espejos)...")
     instances = [
         "https://inv.tux.pizza",
         "https://invidious.jing.rocks",
         "https://vid.uff.ink",
-        "https://yt.artemislena.eu",
-        "https://invidious.projectsegfau.lt"
+        "https://yt.artemislena.eu"
     ]
     
     for base_url in instances:
         try:
-            # 1. Obtener metadatos del video
             url = f"{base_url}/api/v1/videos/{video_id}"
             res = requests.get(url, timeout=5)
             if res.status_code != 200: continue
@@ -97,98 +128,51 @@ def get_transcript_invidious(video_id):
             data = res.json()
             captions = data.get('captions', [])
             
-            # 2. Buscar subtítulo en español
-            selected_caption = None
+            selected = None
             for cap in captions:
-                if 'es' in cap['label'].lower() or 'spanish' in cap['label'].lower() or cap['lang'] == 'es':
-                    selected_caption = cap
+                if 'es' in cap['label'].lower():
+                    selected = cap
                     break
             
-            # Si no hay español, probar inglés
-            if not selected_caption and captions:
-                selected_caption = captions[0]
+            if not selected and captions: selected = captions[0]
 
-            if selected_caption:
-                # 3. Descargar el texto (suele venir en formato VTT)
-                cap_url = f"{base_url}{selected_caption['url']}"
-                cap_res = requests.get(cap_url)
-                
-                # Limpiar el formato VTT para dejar solo texto
-                raw_text = cap_res.text
-                clean_text = clean_vtt(raw_text)
-                if len(clean_text) > 50:
-                    print(f"      ✅ Éxito en {base_url}")
-                    return clean_text
-
-        except Exception:
-            continue
-            
+            if selected:
+                cap_res = requests.get(f"{base_url}{selected['url']}")
+                return clean_vtt(cap_res.text)
+        except: continue
     return None
 
 def clean_vtt(vtt_content):
-    # Elimina tiempos y cabeceras del formato WebVTT
     lines = vtt_content.splitlines()
-    text_lines = []
+    text = []
     for line in lines:
-        if '-->' in line or line.strip() == 'WEBVTT' or not line.strip():
-            continue
-        # Eliminar etiquetas HTML como <c.colorE5E5E5>
-        clean_line = re.sub(r'<[^>]+>', '', line)
-        text_lines.append(clean_line)
-    return " ".join(dict.fromkeys(text_lines)) # Elimina duplicados seguidos y une
+        if '-->' not in line and 'WEBVTT' not in line and line.strip():
+            text.append(re.sub(r'<[^>]+>', '', line))
+    return " ".join(dict.fromkeys(text))
 
-# --- NIVEL 3: RED PIPED (Otra alternativa) ---
-def get_transcript_piped(video_id):
-    print("   🔹 Intento 3: Red Piped...")
-    api_url = f"https://pipedapi.kavin.rocks/streams/{video_id}"
-    try:
-        res = requests.get(api_url, timeout=10)
-        data = res.json()
-        subtitles = data.get('subtitles', [])
-        
-        tgt_sub = None
-        for sub in subtitles:
-            if sub['code'] == 'es':
-                tgt_sub = sub
-                break
-        
-        if not tgt_sub and subtitles: tgt_sub = subtitles[0] # Fallback cualquiera
-
-        if tgt_sub:
-            # Piped devuelve formato XML/VTT a veces, tratamos de limpiarlo
-            sub_res = requests.get(tgt_sub['url'])
-            # Usamos BeautifulSoup para extraer solo texto si es XML
-            soup = BeautifulSoup(sub_res.text, "html.parser")
-            return soup.get_text().replace('\n', ' ')
-            
-    except Exception as e:
-        print(f"      Fallo Piped: {e}")
-        return None
-    return None
-
-# --- CONTROLADOR PRINCIPAL ---
+# --- CONTROLADOR ---
 def obtener_transcripcion_blindada(video_id):
-    # Secuencia de intentos
     texto = get_transcript_official(video_id)
     if texto: return texto
     
     texto = get_transcript_invidious(video_id)
     if texto: return texto
     
-    texto = get_transcript_piped(video_id)
-    if texto: return texto
-    
     return None
 
 def generate_news(text, title):
-    # Usamos modelo Pro o Flash según disponibilidad
-    modelos = ['gemini-1.5-flash', 'gemini-pro']
+    # Usamos gemini-pro que es más estable en versiones viejas de la lib
+    modelos = ['gemini-pro', 'gemini-1.5-flash']
+    
     for m in modelos:
         try:
             model = genai.GenerativeModel(m)
             prompt = f"Eres periodista. Escribe noticia HTML (+300 palabras) sobre '{title}'. TRANSCRIPCION: {text[:25000]}"
-            return model.generate_content(prompt).text
-        except: continue
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            print(f"   ⚠️ Error modelo {m}: {e}")
+            continue
     return None
 
 def main():
@@ -207,12 +191,10 @@ def main():
                 continue
 
             print(f"✨ Procesando: {vtitle}")
-            
-            # AQUÍ OBTENEMOS LA TRANSCRIPCIÓN SÍ O SÍ
             transcript = obtener_transcripcion_blindada(vid)
             
             if transcript:
-                print(f"   📜 Transcripción conseguida ({len(transcript)} caracteres)")
+                print(f"   📜 Transcripción OK.")
                 html = generate_news(transcript, vtitle)
                 if html:
                     post = VideoNoticia(id=vid, titulo=vtitle, contenido_noticia=html, url_video=f"https://youtu.be/{vid}")
@@ -220,9 +202,9 @@ def main():
                     session.commit()
                     print("   ✅ GUARDADO")
                 else:
-                    print("   ❌ Error en generación IA")
+                    print("   ❌ Error Gemini")
             else:
-                print("   ❌ IMPOSIBLE OBTENER TRANSCRIPCIÓN (Se omitirá el video)")
+                print("   ❌ IMPOSIBLE OBTENER TRANSCRIPCIÓN")
 
     except Exception as e:
         print(f"Error General: {e}")

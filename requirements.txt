@@ -1,4 +1,4 @@
-youtube-transcript-api>=0.6.0
+youtube-transcript-api
 google-generativeai
 sqlalchemy
 psycopg2-binary
